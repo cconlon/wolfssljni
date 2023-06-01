@@ -161,7 +161,7 @@ public class WolfSSLSocket extends SSLSocket {
 
             /* get helper class for common methods */
             EngineHelper = new WolfSSLEngineHelper(this.ssl, this.authStore,
-                    this.params, port, host.getHostName());
+                    this.params, port, host);
             EngineHelper.setUseClientMode(clientMode);
 
         } catch (WolfSSLException e) {
@@ -206,7 +206,7 @@ public class WolfSSLSocket extends SSLSocket {
 
             /* get helper class for common methods */
             EngineHelper = new WolfSSLEngineHelper(this.ssl, this.authStore,
-                    this.params, port, address.getHostName());
+                    this.params, port, address);
             EngineHelper.setUseClientMode(clientMode);
 
         } catch (WolfSSLException e) {
@@ -1596,7 +1596,7 @@ public class WolfSSLSocket extends SSLSocket {
            SSLSocket.connect() was explicitly called with SocketAddress */
         if (address != null && EngineHelper != null) {
             EngineHelper.setHostAndPort(
-                address.getAddress().getHostName(),
+                address.getAddress().getHostAddress(),
                 address.getPort());
         }
 
@@ -1646,7 +1646,7 @@ public class WolfSSLSocket extends SSLSocket {
            SSLSocket.connect() was explicitly called with SocketAddress */
         if (address != null && EngineHelper != null) {
             EngineHelper.setHostAndPort(
-                address.getAddress().getHostName(),
+                address.getAddress().getHostAddress(),
                 address.getPort());
         }
 

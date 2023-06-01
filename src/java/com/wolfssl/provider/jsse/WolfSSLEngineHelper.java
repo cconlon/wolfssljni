@@ -25,17 +25,19 @@ import com.wolfssl.WolfSSLException;
 import com.wolfssl.WolfSSLSession;
 import java.util.Arrays;
 import java.util.List;
+import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.X509TrustManager;
 import javax.net.ssl.SSLHandshakeException;
 
 /**
- * This is a helper function to account for similar methods between SSLSocket
+ * This is a helper class to account for similar methods between SSLSocket
  * and SSLEngine.
  *
- * This class wraps a new WOLFSSL object that is created. All methods are
- * protected or private because this class should only be used internally.
+ * This class wraps a new WOLFSSL object that is created (inside
+ * WolfSSLSession). All methods are protected or private because this class
+ * should only be used internally to wolfJSSE.
  *
  * @author wolfSSL
  */
@@ -43,11 +45,31 @@ public class WolfSSLEngineHelper {
     private final WolfSSLSession ssl;
     private WolfSSLImplementSSLSession session = null;
     private WolfSSLParameters params;
+
+    /* Peer hostname, used for session cache lookup (combined with port),
+     * and SNI as secondary if user has not set via SSLParameters */
+    private String hostname = null;
+
+    /* Peer port, used for session cache lookup (combined with hostname) */
     private int port;
-    private String hostname = null;  /* used for session lookup and SNI */
+
+    /* Peer InetAddress, may be set when creating SSLSocket, otherwise
+     * will be null if String host constructor was used instead.
+     * If hostname above is null, and user has not set SSLParameters,
+     * if 'jdk.tls.trustNameService' property has been set will try to set
+     * SNI based on this using peerAddr.getHostName() */
+    private InetAddress peerAddr = null;
+
+    /* Reference to WolfSSLAuthStore, comes from WolfSSLContext */
     private WolfSSLAuthStore authStore = null;
+
+    /* Is this client side (true) or server (false) */
     private boolean clientMode;
+
+    /* Is session creation allowed for this object */
     private boolean sessionCreation = true;
+
+    /* Has setUseClientMode() been called on this object */
     private boolean modeSet = false;
 
     /* Internal Java verify callback, used when user/app is not using
@@ -71,6 +93,7 @@ public class WolfSSLEngineHelper {
      */
     protected WolfSSLEngineHelper(WolfSSLSession ssl, WolfSSLAuthStore store,
             WolfSSLParameters params) throws WolfSSLException {
+
         if (params == null || ssl == null || store == null) {
             throw new WolfSSLException("Bad argument");
         }
@@ -96,6 +119,7 @@ public class WolfSSLEngineHelper {
     protected WolfSSLEngineHelper(WolfSSLSession ssl, WolfSSLAuthStore store,
             WolfSSLParameters params, int port, String hostname)
             throws WolfSSLException {
+
         if (params == null || ssl == null || store == null) {
             throw new WolfSSLException("Bad argument");
         }
@@ -109,6 +133,36 @@ public class WolfSSLEngineHelper {
         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
             "created new WolfSSLEngineHelper(port: " + port +
             ", hostname: " + hostname + ")");
+    }
+
+    /**
+     * Allows for new session and resume session by default
+     * @param ssl WOLFSSL session
+     * @param store main auth store holding session tables and managers
+     * @param params default parameters to use on connection
+     * @param port port number as hint for resume
+     * @param hostaddr InetAddress of peer, used for session resumption and
+     *                 SNI if system property is set
+     * @throws WolfSSLException if an exception happens during session resume
+     */
+    protected WolfSSLEngineHelper(WolfSSLSession ssl, WolfSSLAuthStore store,
+            WolfSSLParameters params, int port, InetAddress peerAddr)
+            throws WolfSSLException {
+
+        if (params == null || ssl == null || store == null ||
+            peerAddr == null) {
+            throw new WolfSSLException("Bad argument");
+        }
+
+        this.ssl = ssl;
+        this.params = params;
+        this.port = port;
+        this.peerAddr = peerAddr;
+        this.authStore = store;
+        this.session = new WolfSSLImplementSSLSession(store);
+        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+            "created new WolfSSLEngineHelper(port: " + port +
+            ", IP: " + peerAddr.getHostAddress() + ")");
     }
 
     /**
@@ -503,37 +557,100 @@ public class WolfSSLEngineHelper {
         }
     }
 
-    /* sets SNI server names, if set by application in SSLParameters */
-    private void setLocalServerNames() {
-        if (this.clientMode) {
 
-            /* explicitly set if user has set through SSLParameters */
+    /**
+     * Get the value of a boolean system property.
+     * If not set (property is null), use the default value given.
+     *
+     * @param prop System property to check
+     * @param defaultVal Default value to use if property is null
+     * @return Boolean value of the property, true/false
+     */
+    private static boolean checkBooleanProperty(String prop,
+        boolean defaultVal) {
+
+        String enabled = System.getProperty(prop);
+
+        if (enabled == null) {
+            return defaultVal;
+        }
+
+        if (enabled.equalsIgnoreCase("true")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Set SNI server names on client side.
+     *
+     * SNI names are only set if the 'jsse.enableSNIExtension' system
+     * property has not been set to false. Default for this property
+     * is defined by Oracle to be true.
+     *
+     * We first try to set SNI names from SSLParameters if set by the user.
+     * If not set in SSLParameters, use the hostname string if set when
+     * SSLSocket was created, and if not set using InetAddress.getHostName()
+     * ONLY if 'jdk.tls.trustNameService' is set to true.
+     */
+    private void setLocalServerNames() {
+
+        /* Do not add SNI if system property has been set to false */
+        boolean enableSNI =
+            checkBooleanProperty("jsse.enableSNIExtension", true);
+
+        /* Have we been instructed to trust the system name service for
+         * reverse DNS lookups? */
+        boolean trustNameService =
+            checkBooleanProperty("jdk.tls.trustNameService", false);
+
+        if (!enableSNI) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                "jsse.enableSNIExtension property set to false, " +
+                "not adding SNI to ClientHello");
+        }
+        else if (this.clientMode) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                "jsse.enableSNIExtension property set to true, " +
+                "enabling SNI");
+
+            /* Explicitly set if user has set through SSLParameters */
             List<WolfSSLSNIServerName> names = this.params.getServerNames();
             if (names != null && names.size() > 0) {
-                /* should only be one server name */
+                /* Should only be one server name */
                 WolfSSLSNIServerName sni = names.get(0);
                 if (sni != null) {
                     this.ssl.useSNI((byte)sni.getType(), sni.getEncoded());
                 }
+
             } else {
-                /* otherwise set based on socket hostname if
-                 * 'jsee.enableSNIExtension' java property is set to true */
-                String enableSNI = System.getProperty("jsse.enableSNIExtension", "true");
-                if (enableSNI.equalsIgnoreCase("true")) {
-
+                if (this.hostname != null) {
                     WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        "jsse.enableSNIExtension property set to true, " +
-                        "enabling SNI by default");
+                        "setting SNI extension with hostname: " +
+                        this.hostname);
+                    this.ssl.useSNI((byte)0, this.hostname.getBytes());
 
-                    if (this.hostname != null) {
+                }
+                else if (this.peerAddr != null) {
+                    if (trustNameService) {
                         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            "setting SNI extension with hostname: " +
-                            this.hostname);
-                        this.ssl.useSNI((byte)0, this.hostname.getBytes());
-                    } else {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            "hostname is null, not setting SNI");
+                            "setting SNI extension with " +
+                            "InetAddress.getHostName(): " +
+                            this.peerAddr.getHostName());
+
+                        this.ssl.useSNI((byte)0,
+                            this.peerAddr.getHostName().getBytes());
                     }
+                    else {
+                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                            "jdk.tls.trustNameService not set to true, " +
+                            "not doing reverse DNS lookup to set SNI");
+                    }
+                }
+                else {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        "hostname and peerAddr are null, not setting SNI");
                 }
             }
         }
@@ -676,13 +793,24 @@ public class WolfSSLEngineHelper {
      *
      */
     protected void initHandshake() throws SSLException {
+
+        String sessCacheHostname = this.hostname;
+
         if (!modeSet) {
             throw new SSLException("setUseClientMode has not been called");
         }
 
+        /* If InetAddress was used to create SSLSocket, use IP address for
+         * session resumption to avoid DNS lookup with
+         * InetAddress.getHostName(). Can cause performance issues if DNS server
+         * is not available and timeout is long. */
+        if (sessCacheHostname == null && this.peerAddr != null) {
+            sessCacheHostname = this.peerAddr.getHostAddress();
+        }
+
         /* create non null session */
-        this.session = this.authStore.getSession(ssl, this.port, this.hostname,
-            this.clientMode);
+        this.session = this.authStore.getSession(ssl, this.port,
+            sessCacheHostname, this.clientMode);
 
         if (this.session != null) {
             if (this.clientMode) {
@@ -709,7 +837,7 @@ public class WolfSSLEngineHelper {
             if (this.sessionCreation) {
                 /* can only add new sessions to the resumption table if session
                  * creation is allowed */
-                this.authStore.addSession(this.session);
+                this.authStore.addSession(this.session, this.clientMode);
             }
         }
 
