@@ -788,7 +788,7 @@ public class WolfSSLSocket extends SSLSocket {
             /* get helper class for common methods */
             EngineHelper = new WolfSSLEngineHelper(this.ssl, this.authStore,
                     this.params, s.getPort(),
-                    s.getInetAddress().getHostName());
+                    s.getInetAddress());
             EngineHelper.setUseClientMode(clientMode);
 
         } catch (WolfSSLException e) {
