@@ -826,6 +826,12 @@ public class WolfSSLEngine extends SSLEngine {
         synchronized (ioLock) {
             try {
                 ret = this.ssl.read(tmp, maxOutSz);
+                if ((ret < 0) &&
+                    (ssl.getError(ret) == WolfSSL.APP_DATA_READY)) {
+                    /* If DTLS, we may need to call SSL_read() again
+                     * right away again if app data was received */
+                    ret = this.ssl.read(tmp, maxOutSz);
+                }
             } catch (SocketTimeoutException | SocketException e) {
                 throw new SSLException(e);
             }
@@ -1156,8 +1162,16 @@ public class WolfSSLEngine extends SSLEngine {
                         if (ret < 0 && err == WolfSSL.SSL_ERROR_WANT_READ &&
                             in.remaining() == 0 && (this.toSend == null ||
                             (this.toSend != null && this.toSend.length == 0))) {
-                            /* Need more data */
-                            status = SSLEngineResult.Status.BUFFER_UNDERFLOW;
+                            try {
+                                if (this.ssl.dtls() == 0 ||
+                                    (this.params.getMaximumPacketSize() >
+                                        in.limit())) {
+                                    /* Need more data */
+                                    status = SSLEngineResult.Status.BUFFER_UNDERFLOW;
+                                }
+                            } catch (WolfSSLJNIException e) {
+                                /* May be thrown from ssl.dtls(), ignore */
+                            }
                         }
                     }
                 }
@@ -1475,7 +1489,13 @@ public class WolfSSLEngine extends SSLEngine {
     public synchronized SSLSession getHandshakeSession() {
         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
             "entered getHandshakeSession()");
-        return this.engineHelper.getSession();
+
+        if (!this.handshakeFinished) {
+            /* Only return handshake session during the handshake */
+            return this.engineHelper.getSession();
+        }
+
+        return null;
     }
 
     /**

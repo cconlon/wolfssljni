@@ -767,6 +767,7 @@ public class WolfSSLEngineHelper {
             }
         }
 
+        /* Note: No SSL_OP_NO_* for DTLS in native wolfSSL */
         if (set[0] == false) {
             mask |= WolfSSL.SSL_OP_NO_TLSv1_3;
         }

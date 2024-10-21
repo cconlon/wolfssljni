@@ -218,6 +218,8 @@ public class WolfSSL {
     public static final int SSL_ERROR_SOCKET_PEER_CLOSED = -397;
     /** Unrecognized ALPN protocol name */
     public static final int UNKNOWN_ALPN_PROTOCOL_NAME_E = -405;
+    /** DTLS application data ready for read */
+    public static final int APP_DATA_READY = -441;
 
     /* extra definitions from ssl.h */
     /** CertManager: check all cert CRLs */
@@ -804,6 +806,13 @@ public class WolfSSL {
      * @return true if enabled, otherwise false if not compiled in.
      */
     public static native boolean TLSv13Enabled();
+
+    /**
+     * Tests if DTLS 1.3 has been compiled into the native wolfSSL library.
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean DTLSv13Enabled();
 
     /**
      * Tests if SHA-1 is enabled in the native wolfSSL library.
