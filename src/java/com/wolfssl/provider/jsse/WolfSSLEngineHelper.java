@@ -1119,6 +1119,35 @@ public class WolfSSLEngineHelper {
         }
     }
 
+    private void setLocalMaximumPacketSize() {
+        /* Set maximum packet size, currently only makes a differnce if
+         * DTLS is enabled and used. Calling application will set this via
+         * SSLParameters.setMaximumPacketSize(). */
+        int ret;
+        int maxPacketSize = this.params.getMaximumPacketSize();
+        if (maxPacketSize != 0) {
+            /* Zero size means use implicit sizing logic of implementation,
+             * take no special action here if 0. */
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                "Maximum packet size found in SSLParameters: " + maxPacketSize);
+
+            ret = this.ssl.dtlsSetMTU(maxPacketSize);
+            if (ret == WolfSSL.SSL_SUCCESS) {
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    "set maximum packet size (DTLS MTU): " + maxPacketSize);
+            }
+            else if (ret == WolfSSL.NOT_COMPILED_IN) {
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    "DTLS or MTU not compiled in, skipping setting " +
+                    "max packet size");
+            }
+            else {
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    "error setting DTLS MTU, ret = " + ret);
+            }
+        }
+    }
+
     private void setLocalParams(SSLSocket socket, SSLEngine engine)
         throws SSLException {
 
@@ -1133,6 +1162,7 @@ public class WolfSSLEngineHelper {
         this.setLocalSecureRenegotiation();
         this.setLocalSigAlgorithms();
         this.setLocalSupportedCurves();
+        this.setLocalMaximumPacketSize();
     }
 
     /**

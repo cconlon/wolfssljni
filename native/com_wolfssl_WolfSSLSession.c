@@ -2217,6 +2217,23 @@ JNIEXPORT jobject JNICALL Java_com_wolfssl_WolfSSLSession_dtlsGetPeer
     }
 }
 
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_setMTU
+  (JNIEnv* jenv, jobject jcl, jlong sslPtr, jint mtu)
+{
+#if defined(WOLFSSL_DTLS) && defined(WOLFSSL_DTLS_MTU)
+    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
+
+    /* wolfSSL_dtls_set_mtu() checks ssl for NULL */
+    return (jint)wolfSSL_dtls_set_mtu(ssl, (unsigned short)mtu);
+#else
+    (void)jenv;
+    (void)jcl;
+    (void)sslPtr;
+    (void)mtu;
+    return (jint)NOT_COMPILED_IN;
+#endif
+}
+
 JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_sessionReused
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {

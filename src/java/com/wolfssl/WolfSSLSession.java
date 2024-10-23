@@ -351,6 +351,7 @@ public class WolfSSLSession {
     private native int set1SigAlgsList(long ssl, String list);
     private native int useSupportedCurve(long ssl, int name);
     private native int hasTicket(long session);
+    private native int setMTU(long ssl, int mtu);
 
     /* ------------------- session-specific methods --------------------- */
 
@@ -1838,6 +1839,30 @@ public class WolfSSLSession {
 
         synchronized (sslLock) {
             return dtlsGetPeer(this.sslPtr);
+        }
+    }
+
+    /**
+     * Set the DTLS MTU to use.
+     *
+     * Native wolfSSL must be compiled with "--enable-dtls-mtu" in addition
+     * to "--enable-dtls".
+     *
+     * @param mtu DTLS MTU value, must be lower than MAX_RECORD_SIZE (16k)
+     *
+     * @return <code>SSL_SUCCESS</code> on success,
+     *         <code>SSL_FAILURE</code> on error<code>, or
+     *         <code>NOT_COMPILED_IN</code> if native support has not
+     *         been compiled into native wolfSSL.
+     *
+     * @throws IllegalStateException WolfSSLContext has been freed
+     */
+    public int dtlsSetMTU(int mtu) throws IllegalStateException {
+
+        confirmObjectIsActive();
+
+        synchronized (sslLock) {
+            return setMTU(this.sslPtr, mtu);
         }
     }
 

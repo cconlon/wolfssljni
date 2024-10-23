@@ -871,6 +871,14 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useSupportedCurve
 JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_hasTicket
   (JNIEnv *, jobject, jlong);
 
+/*
+ * Class:     com_wolfssl_WolfSSLSession
+ * Method:    setMTU
+ * Signature: (JI)I
+ */
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_setMTU
+  (JNIEnv *, jobject, jlong, jint);
+
 #ifdef __cplusplus
 }
 #endif
