@@ -247,6 +247,8 @@ public class WolfSSLEngine extends SSLEngine {
      */
     private void checkAndInitSSLEngine() throws SSLException {
 
+        int ret = 0;
+
         synchronized (initLock) {
 
             if (!needInit) {
@@ -256,6 +258,21 @@ public class WolfSSLEngine extends SSLEngine {
             LoadCertAndKey();
 
             this.engineHelper.initHandshake(this);
+
+            if ((this.ssl.dtls() == 1) &&
+                (!this.engineHelper.getUseClientMode())) {
+                ret = this.ssl.sendHrrCookie(null);
+                if (ret == WolfSSL.SSL_SUCCESS) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        "Enabled sending of DTLS cookie in HelloRetryRequest");
+                }
+                else if (ret < 0) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        "Failed to enable DTLS cookie in HelloRetryRequest, " +
+                        "ret: " + ret);
+                }
+            }
+
             needInit = false;
             closed = false; /* opened a connection */
         }
@@ -313,6 +330,7 @@ public class WolfSSLEngine extends SSLEngine {
     }
 
     private void initSSL() throws WolfSSLException, WolfSSLJNIException {
+
         if (sendCb == null) {
             sendCb = new SendCB();
         }
