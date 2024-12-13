@@ -69,6 +69,7 @@ public class WolfSSLSessionTest {
     private final static String exampleHost = "www.example.com";
     private final static int examplePort = 443;
 
+    private static WolfSSL sslLib = null;
     private static WolfSSLContext ctx = null;
 
     @BeforeClass
@@ -78,7 +79,13 @@ public class WolfSSLSessionTest {
         System.out.println("WolfSSLSession Class");
 
         try {
+            /* Load native JNI library */
             WolfSSL.loadLibrary();
+
+            /* Initialize wolfSSL library, also runs FIPS CASTs if
+             * using FIPS version of native wolfCrypt. */
+            sslLib = new WolfSSL();
+
         } catch (UnsatisfiedLinkError ule) {
             fail("failed to load native JNI library");
         }
@@ -678,7 +685,6 @@ public class WolfSSLSessionTest {
         throws WolfSSLJNIException {
 
         int ret, err;
-        WolfSSL sslLib = null;
         WolfSSLContext sslCtx = null;
         WolfSSLSession ssl = null;
         Socket sock = null;
@@ -687,8 +693,7 @@ public class WolfSSLSessionTest {
 
         try {
 
-            /* setup library, context, session, socket */
-            sslLib = new WolfSSL();
+            /* setup context, session, socket */
             sslCtx = new WolfSSLContext(WolfSSL.TLSv1_2_ClientMethod());
             sslCtx.setVerify(WolfSSL.SSL_VERIFY_NONE, null);
             ssl = new WolfSSLSession(sslCtx);
@@ -759,7 +764,6 @@ public class WolfSSLSessionTest {
         throws WolfSSLJNIException {
 
         int ret, err;
-        WolfSSL sslLib = null;
         WolfSSLContext sslCtx = null;
         WolfSSLSession ssl = null;
         Socket sock = null;
@@ -769,8 +773,7 @@ public class WolfSSLSessionTest {
 
         try {
 
-            /* setup library, context, session, socket */
-            sslLib = new WolfSSL();
+            /* setup context, session, socket */
             sslCtx = new WolfSSLContext(WolfSSL.TLSv1_2_ClientMethod());
             sslCtx.setVerify(WolfSSL.SSL_VERIFY_NONE, null);
             ssl = new WolfSSLSession(sslCtx);
@@ -834,7 +837,6 @@ public class WolfSSLSessionTest {
         throws WolfSSLJNIException {
 
         int ret, err;
-        WolfSSL sslLib = null;
         WolfSSLContext sslCtx = null;
         WolfSSLSession ssl = null;
         Socket sock = null;
@@ -844,8 +846,7 @@ public class WolfSSLSessionTest {
 
         try {
 
-            /* setup library, context, session, socket */
-            sslLib = new WolfSSL();
+            /* setup context, session, socket */
             sslCtx = new WolfSSLContext(WolfSSL.TLSv1_2_ClientMethod());
             sslCtx.setVerify(WolfSSL.SSL_VERIFY_NONE, null);
             ssl = new WolfSSLSession(sslCtx);
@@ -890,7 +891,6 @@ public class WolfSSLSessionTest {
         throws WolfSSLJNIException {
 
         int ret;
-        WolfSSL sslLib = null;
         WolfSSLContext sslCtx = null;
         WolfSSLSession ssl = null;
         TestTls13SecretCb cb = null;
@@ -904,8 +904,7 @@ public class WolfSSLSessionTest {
 
         try {
 
-            /* setup library, context, session, socket */
-            sslLib = new WolfSSL();
+            /* setup context, session, socket */
             sslCtx = new WolfSSLContext(WolfSSL.TLSv1_3_ClientMethod());
             sslCtx.setVerify(WolfSSL.SSL_VERIFY_NONE, null);
             ssl = new WolfSSLSession(sslCtx);
