@@ -414,7 +414,7 @@ public class WolfSSLContextTest {
         /* already sorted highest to lowest (ie TLSv1.3, ..., TLSv1.1) */
         List<?> enabledNativeProtocols = Arrays.asList(WolfSSL.getProtocols());
 
-        if (ctxProtocol == "TLS") {
+        if (ctxProtocol.equals("TLS")) {
             if (enabledNativeProtocols.contains("TLSv1.3")) {
                 expected.add("TLSv1.3");
             }
@@ -429,7 +429,7 @@ public class WolfSSLContextTest {
             }
         }
 
-        else if (ctxProtocol == "TLSv1.3") {
+        else if (ctxProtocol.equals("TLSv1.3")) {
             if (enabledNativeProtocols.contains("TLSv1.3")) {
                 expected.add("TLSv1.3");
             }
@@ -444,7 +444,7 @@ public class WolfSSLContextTest {
             }
         }
 
-        else if (ctxProtocol == "TLSv1.2") {
+        else if (ctxProtocol.equals("TLSv1.2")) {
             if (enabledNativeProtocols.contains("TLSv1.2")) {
                 expected.add("TLSv1.2");
             }
@@ -456,7 +456,7 @@ public class WolfSSLContextTest {
             }
         }
 
-        else if (ctxProtocol == "TLSv1.1") {
+        else if (ctxProtocol.equals("TLSv1.1")) {
             if (enabledNativeProtocols.contains("TLSv1.1")) {
                 expected.add("TLSv1.1");
             }
@@ -465,7 +465,7 @@ public class WolfSSLContextTest {
             }
         }
 
-        else if (ctxProtocol == "TLSv1") {
+        else if (ctxProtocol.equals("TLSv1")) {
             if (enabledNativeProtocols.contains("TLSv1")) {
                 expected.add("TLSv1");
             }
@@ -524,8 +524,12 @@ public class WolfSSLContextTest {
             if (!Arrays.equals(defaultSSLContextProtocols,
                     expectedList.toArray(new String[expectedList.size()]))) {
                 System.out.print("\t... failed");
-                fail("Default SSLContext protocol list did not " +
-                     "match expected");
+                fail("Default SSLContext(" + allProtocols[i] +
+                     ") protocol list did not match " +
+                     "expected. Got: " +
+                     Arrays.toString(defaultSSLContextProtocols) +
+                     " Expected: " + Arrays.toString(expectedList.toArray(
+                        new String[expectedList.size()])));
             }
 
             /* Also test SSLSocket.getEnabledProtocols() */
