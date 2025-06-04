@@ -25,6 +25,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.security.KeyStore;
 import java.security.Principal;
 import java.security.Provider;
 import java.security.Security;
@@ -455,6 +456,284 @@ public class WolfSSLKeyX509Test {
 
         /* Currently SSLSocket argument is not used by wolfJSSE, if this
          * behavior changes, add tests here */
+
+        pass("\t... passed");
+    }
+
+    @Test
+    public void testConstructorWithInvalidKeyStore()
+        throws NoSuchAlgorithmException, KeyStoreException,
+               KeyManagementException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        System.out.print("\tTesting with invalid KeyStore");
+
+        /* Test with null KeyStore - should not throw exception */
+        try {
+            com.wolfssl.provider.jsse.WolfSSLKeyX509 km =
+                new com.wolfssl.provider.jsse.WolfSSLKeyX509(null, null);
+            /* Should succeed with empty cache */
+        } catch (Exception e) {
+            error("\t... failed");
+            fail("Constructor should handle null KeyStore gracefully: " + e);
+        }
+
+        pass("\t... passed");
+    }
+
+    @Test
+    public void testCacheConsistencyWithKeyStore()
+        throws NoSuchAlgorithmException, KeyStoreException,
+               KeyManagementException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        KeyManager[] list;
+        X509KeyManager km;
+        String[] aliases;
+
+        System.out.print("\tTesting cache consistency");
+
+        /* Create KeyManager with cached WolfSSLKeyX509 */
+        list = tf.createKeyManager("SunX509", tf.allJKS, provider);
+        km = (X509KeyManager) list[0];
+
+        /* Test that cached aliases match what we expect */
+        aliases = km.getClientAliases("RSA", null);
+        if (aliases == null || aliases.length == 0) {
+            error("\t... failed");
+            fail("No RSA client aliases found in cache");
+        }
+
+        /* Test certificate chain consistency */
+        for (String alias : aliases) {
+            if (alias != null) {
+                X509Certificate[] chain = km.getCertificateChain(alias);
+                if (chain == null) {
+                    error("\t... failed");
+                    fail("Certificate chain missing from cache for alias: " + alias);
+                }
+            }
+        }
+
+        /* Test private key consistency */
+        for (String alias : aliases) {
+            if (alias != null) {
+                /* Private key may be null for some aliases, that's expected */
+                km.getPrivateKey(alias);
+            }
+        }
+
+        pass("\t... passed");
+    }
+
+    @Test
+    public void testEmptyKeyStoreCache()
+        throws NoSuchAlgorithmException, KeyStoreException,
+               KeyManagementException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        System.out.print("\tTesting empty KeyStore cache");
+
+        try {
+            /* Create empty KeyStore */
+            KeyStore emptyStore = KeyStore.getInstance("JKS");
+            emptyStore.load(null, null);
+
+            /* Create WolfSSLKeyX509 with empty KeyStore */
+            com.wolfssl.provider.jsse.WolfSSLKeyX509 km =
+                new com.wolfssl.provider.jsse.WolfSSLKeyX509(emptyStore, null);
+
+            /* Test methods with empty cache */
+            String[] aliases = km.getClientAliases("RSA", null);
+            if (aliases != null) {
+                error("\t... failed");
+                fail("Expected null aliases from empty KeyStore");
+            }
+
+            aliases = km.getServerAliases("RSA", null);
+            if (aliases != null) {
+                error("\t... failed");
+                fail("Expected null server aliases from empty KeyStore");
+            }
+
+            String alias = km.chooseClientAlias(new String[] {"RSA"}, null, null);
+            if (alias != null) {
+                error("\t... failed");
+                fail("Expected null client alias from empty KeyStore");
+            }
+
+            alias = km.chooseServerAlias("RSA", null, null);
+            if (alias != null) {
+                error("\t... failed");
+                fail("Expected null server alias from empty KeyStore");
+            }
+
+        } catch (Exception e) {
+            error("\t... failed");
+            fail("Empty KeyStore test failed: " + e);
+        }
+
+        pass("\t... passed");
+    }
+
+    @Test
+    public void testNullKeyStoreCache()
+        throws NoSuchAlgorithmException, KeyStoreException,
+               KeyManagementException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        System.out.print("\tTesting null KeyStore cache");
+
+        try {
+            /* Create WolfSSLKeyX509 with null KeyStore */
+            com.wolfssl.provider.jsse.WolfSSLKeyX509 km =
+                new com.wolfssl.provider.jsse.WolfSSLKeyX509(null, null);
+
+            /* Test methods with null KeyStore */
+            String[] aliases = km.getClientAliases("RSA", null);
+            if (aliases != null) {
+                error("\t... failed");
+                fail("Expected null aliases from null KeyStore");
+            }
+
+            aliases = km.getServerAliases("RSA", null);
+            if (aliases != null) {
+                error("\t... failed");
+                fail("Expected null server aliases from null KeyStore");
+            }
+
+            String alias = km.chooseClientAlias(new String[] {"RSA"}, null, null);
+            if (alias != null) {
+                error("\t... failed");
+                fail("Expected null client alias from null KeyStore");
+            }
+
+            alias = km.chooseServerAlias("RSA", null, null);
+            if (alias != null) {
+                error("\t... failed");
+                fail("Expected null server alias from null KeyStore");
+            }
+
+            X509Certificate[] chain = km.getCertificateChain("nonexistent");
+            if (chain != null) {
+                error("\t... failed");
+                fail("Expected null certificate chain from null KeyStore");
+            }
+
+            java.security.PrivateKey key = km.getPrivateKey("nonexistent");
+            if (key != null) {
+                error("\t... failed");
+                fail("Expected null private key from null KeyStore");
+            }
+
+        } catch (Exception e) {
+            error("\t... failed");
+            fail("Null KeyStore test failed: " + e);
+        }
+
+        pass("\t... passed");
+    }
+
+    @Test
+    public void testCertificateChainCaching()
+        throws NoSuchAlgorithmException, KeyStoreException,
+               KeyManagementException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        KeyManager[] list;
+        X509KeyManager km;
+        X509Certificate[] chain1, chain2;
+
+        System.out.print("\tTesting cert chain caching");
+
+        list = tf.createKeyManager("SunX509", tf.allJKS, provider);
+        km = (X509KeyManager) list[0];
+
+        /* Get certificate chain twice to test caching */
+        chain1 = km.getCertificateChain("client");
+        chain2 = km.getCertificateChain("client");
+
+        if (chain1 == null) {
+            error("\t... failed");
+            fail("Certificate chain should not be null for 'client' alias");
+        }
+
+        if (chain2 == null) {
+            error("\t... failed");
+            fail("Second certificate chain retrieval should not be null");
+        }
+
+        /* Test that both retrievals return the same cached object */
+        if (chain1 != chain2) {
+            error("\t... failed");
+            fail("Certificate chain caching failed - different objects returned");
+        }
+
+        /* Test with non-existent alias */
+        X509Certificate[] nullChain = km.getCertificateChain("nonexistent");
+        if (nullChain != null) {
+            error("\t... failed");
+            fail("Expected null certificate chain for non-existent alias");
+        }
+
+        /* Test with null alias */
+        nullChain = km.getCertificateChain(null);
+        if (nullChain != null) {
+            error("\t... failed");
+            fail("Expected null certificate chain for null alias");
+        }
+
+        pass("\t... passed");
+    }
+
+    @Test
+    public void testPrivateKeyCaching()
+        throws NoSuchAlgorithmException, KeyStoreException,
+               KeyManagementException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        KeyManager[] list;
+        X509KeyManager km;
+        java.security.PrivateKey key1, key2;
+
+        System.out.print("\tTesting private key caching");
+
+        list = tf.createKeyManager("SunX509", tf.allJKS, provider);
+        km = (X509KeyManager) list[0];
+
+        /* Get private key twice to test caching */
+        key1 = km.getPrivateKey("client");
+        key2 = km.getPrivateKey("client");
+
+        if (key1 == null) {
+            error("\t... failed");
+            fail("Private key should not be null for 'client' alias");
+        }
+
+        if (key2 == null) {
+            error("\t... failed");
+            fail("Second private key retrieval should not be null");
+        }
+
+        /* Test that both retrievals return the same cached object */
+        if (key1 != key2) {
+            error("\t... failed");
+            fail("Private key caching failed - different objects returned");
+        }
+
+        /* Test with non-existent alias */
+        java.security.PrivateKey nullKey = km.getPrivateKey("nonexistent");
+        if (nullKey != null) {
+            error("\t... failed");
+            fail("Expected null private key for non-existent alias");
+        }
+
+        /* Test with null alias */
+        nullKey = km.getPrivateKey(null);
+        if (nullKey != null) {
+            error("\t... failed");
+            fail("Expected null private key for null alias");
+        }
 
         pass("\t... passed");
     }

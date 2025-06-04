@@ -30,6 +30,11 @@ import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.Arrays;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.X509ExtendedKeyManager;
 import com.wolfssl.WolfSSLDebug;
@@ -43,71 +48,128 @@ import com.wolfssl.WolfSSLDebug;
  */
 public class WolfSSLKeyX509 extends X509ExtendedKeyManager {
 
-    private KeyStore store;
-    private char[] password;
+    /* Cache for KeyStore entries to avoid concurrent access issues. Prior
+     * to the addition of these caches, WolfSSLKeyX509 called down directly
+     * to the underlying KeyStore for each operation. Since the KeyStore
+     * operations are synchronized, concurrent threads accessing this
+     * KeyManager can queue up in that scenario and hurt performance. */
+    private final Map<String, X509Certificate> certificateCache;
+    private final Map<String, X509Certificate[]> certificateChainCache;
+    private final Map<String, PrivateKey> privateKeyCache;
+    private final Set<String> aliasSet;
 
     /**
      * Create new WolfSSLKeyX509 object
      *
-     * @param in input KeyStore to use with this object
+     * @param store input KeyStore to cache entries from
      * @param password input KeyStore password
+     * @throws KeyStoreException if unable to populate cache from KeyStore
      */
-    public WolfSSLKeyX509(KeyStore in, char[] password) {
-        this.store = in;
-        this.password = password;
+    public WolfSSLKeyX509(KeyStore store, char[] password)
+        throws KeyStoreException {
 
         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
             () -> "creating new WolfSSLKeyX509 object");
+
+        /* Initialize cache data structures */
+        this.certificateCache = new HashMap<String, X509Certificate>();
+        this.certificateChainCache = new HashMap<String, X509Certificate[]>();
+        this.privateKeyCache = new HashMap<String, PrivateKey>();
+        this.aliasSet = new LinkedHashSet<String>();
+
+        /* Populate caches from KeyStore */
+        populateCache(store, password);
     }
 
     /**
-     * Return array of aliases from current KeyStore that matches provided
+     * Populate internal caches with all entries from KeyStore
+     *
+     * @param store KeyStore to read entries from
+     * @param password KeyStore password to access private keys
+     * @throws KeyStoreException if unable to read from KeyStore
+     */
+    private void populateCache(KeyStore store, char[] password)
+        throws KeyStoreException {
+
+        if (store == null) {
+            return;
+        }
+
+        Enumeration<String> aliases = store.aliases();
+
+        while (aliases.hasMoreElements()) {
+            String alias = aliases.nextElement();
+            aliasSet.add(alias);
+
+            try {
+                /* Cache individual certificate */
+                Certificate cert = store.getCertificate(alias);
+                if (cert instanceof X509Certificate) {
+                    certificateCache.put(alias, (X509Certificate)cert);
+                }
+
+                /* Cache certificate chain */
+                Certificate[] certChain = store.getCertificateChain(alias);
+                if (certChain != null) {
+                    int x509Cnt = 0;
+
+                    /* Count X509Certificate entries */
+                    for (int i = 0; i < certChain.length; i++) {
+                        if (certChain[i] instanceof X509Certificate) {
+                            x509Cnt++;
+                        }
+                    }
+
+                    /* Store X509Certificate chain */
+                    if (x509Cnt > 0) {
+                        int idx = 0;
+                        X509Certificate[] x509Chain =
+                            new X509Certificate[x509Cnt];
+
+                        for (int i = 0; i < certChain.length; i++) {
+                            if (certChain[i] instanceof X509Certificate) {
+                                x509Chain[idx++] = (X509Certificate)certChain[i];
+                            }
+                        }
+                        certificateChainCache.put(alias, x509Chain);
+                    }
+                }
+
+                /* Cache private key */
+                PrivateKey key = (PrivateKey)store.getKey(alias, password);
+                if (key != null) {
+                    privateKeyCache.put(alias, key);
+                }
+
+            } catch (Exception e) {
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
+                    () -> "Error caching entry for alias: " + alias + ", " + e);
+                /* Continue processing other aliases */
+            }
+        }
+
+        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+            () -> "Cached " + aliasSet.size() + " aliases from KeyStore");
+    }
+
+    /**
+     * Return array of aliases from cached entries that matches provided
      * type and issuers array.
      *
      * Returns:
-     * null - if current KeyStore is null, error getting aliases from store,
-     *        or no alias mathes found in current KeyStore.
+     * null - if no alias matches found in cache.
      * String[] - aliases, if found that match type and/or issuers
      */
     private String[] getAliases(String type, Principal[] issuers) {
-        Enumeration<String> aliases = null;
         int i;
         ArrayList<String> ret = new ArrayList<String>();
 
-        if (store == null) {
-            return null;
-        }
-
-        try {
-            aliases = this.store.aliases();
-        } catch (KeyStoreException ex) {
-            WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
-                () -> "Error getting aliases from current KeyStore");
-            return null;
-        }
-
-        /* loop through each alias in KeyStore */
-        while (aliases.hasMoreElements()) {
-            String current = aliases.nextElement();
-            X509Certificate cert = null;
-            try {
-                cert = (X509Certificate)this.store.getCertificate(current);
-            } catch (KeyStoreException ex) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
-                    () -> "Error getting certificate from KeyStore " +
-                    "for alias: " + current + ", continuing to next alias");
-                continue;
-            }
+        /* loop through each cached alias */
+        for (String current : aliasSet) {
+            X509Certificate cert = certificateCache.get(current);
 
             if (type != null && cert != null &&
                 !cert.getPublicKey().getAlgorithm().equals(type)) {
-
-                /* free native memory early if X509Certificate is WolfSSLX509 */
-                if (cert instanceof WolfSSLX509) {
-                    ((WolfSSLX509)cert).free();
-                }
-                cert = null;
-
                 /* different public key type, skip */
                 continue;
             }
@@ -135,11 +197,11 @@ public class WolfSSLKeyX509 extends X509ExtendedKeyManager {
                     }
                 }
             }
-        } /* end while */
+        }
 
         if (ret.size() == 0) {
             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                () -> "No aliases found in KeyStore that match type " +
+                () -> "No aliases found in cache that match type " +
                 "and/or issuer");
             return null;
         }
@@ -244,59 +306,76 @@ public class WolfSSLKeyX509 extends X509ExtendedKeyManager {
     @Override
     public X509Certificate[] getCertificateChain(String alias) {
 
-        X509Certificate[] ret = null;
-
         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
             () -> "entered getCertificateChain(), alias: " + alias);
 
-        if (store == null || alias == null) {
+        if (alias == null) {
             return null;
         }
 
-        try {
-            Certificate[] certs = this.store.getCertificateChain(alias);
-            if (certs != null) {
-                int x509Cnt = 0;
-
-                /* count up X509Certificate type in certs[] */
-                for (int i = 0; i < certs.length; i++) {
-                    if (certs[i] instanceof X509Certificate) {
-                        x509Cnt++;
-                    }
-                }
-
-                /* store into X509Certificate array */
-                ret = new X509Certificate[x509Cnt];
-                for (int i = 0; i < certs.length; i++) {
-                    if (certs[i] instanceof X509Certificate) {
-                        ret[i] = (X509Certificate)certs[i];
-                    }
-                }
-            }
-
-        } catch (KeyStoreException ex) {
-            return null;
-        }
-
-        return ret;
+        /* Return cached certificate chain */
+        return certificateChainCache.get(alias);
     }
 
     @Override
     public PrivateKey getPrivateKey(String alias) {
 
-        PrivateKey key = null;
-
         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
             () -> "entered getPrivateKey(), alias: " + alias);
 
-        try {
-            key = (PrivateKey)store.getKey(alias, password);
-        } catch (Exception e) {
-            /* @TODO unable to get key */
-            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                () -> "failed to load private key: " + e);
+        if (alias == null) {
+            return null;
         }
-        return key;
+
+        /* Return cached private key */
+        return privateKeyCache.get(alias);
+    }
+
+    /**
+     * Clear sensitive data when object is garbage collected
+     */
+    @Override
+    protected void finalize() throws Throwable {
+        try {
+            /* Clear cached private keys */
+            if (privateKeyCache != null) {
+                privateKeyCache.clear();
+            }
+
+            /* Free WolfSSLX509 certificates if present */
+            if (certificateCache != null) {
+                for (X509Certificate cert : certificateCache.values()) {
+                    if (cert instanceof WolfSSLX509) {
+                        ((WolfSSLX509)cert).free();
+                    }
+                }
+                certificateCache.clear();
+            }
+
+            /* Free WolfSSLX509 certificate chains if present */
+            if (certificateChainCache != null) {
+                for (X509Certificate[] chain : certificateChainCache.values()) {
+                    if (chain != null) {
+                        for (X509Certificate cert : chain) {
+                            if (cert instanceof WolfSSLX509) {
+                                ((WolfSSLX509)cert).free();
+                            }
+                        }
+                    }
+                }
+                certificateChainCache.clear();
+            }
+
+            if (aliasSet != null) {
+                aliasSet.clear();
+            }
+
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                () -> "WolfSSLKeyX509 finalized, sensitive data cleared");
+
+        } finally {
+            super.finalize();
+        }
     }
 }
 
