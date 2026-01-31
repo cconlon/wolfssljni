@@ -1,0 +1,59 @@
+name: Google Error Prone static analysis
+
+on:
+  push:
+    branches: [ 'master', 'main', 'errorprone', 'release/**' ]
+  pull_request:
+    branches: [ 'master' ]
+
+jobs:
+  errorprone:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ 'ubuntu-latest', 'macos-latest' ]
+    runs-on: ${{ matrix.os }}
+    name: Error Prone (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build native wolfSSL
+      - name: Build native wolfSSL
+        uses: wolfSSL/actions-build-autotools-project@v1
+        with:
+          repository: wolfSSL/wolfssl
+          ref: master
+          path: wolfssl
+          configure: --enable-jni
+          check: false
+          install: true
+
+      # Setup Java (need JDK 11+ to run Error Prone)
+      - name: Setup java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      - name: Set LD_LIBRARY_PATH (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
+
+      - name: Set DYLD_LIBRARY_PATH (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
+
+      # Build wolfssljni JNI library (libwolfssljni.so)
+      - name: Build JNI library
+        run: ./java.sh $GITHUB_WORKSPACE/build-dir
+
+      # Run Error Prone via Maven
+      - name: Run Error Prone analysis
+        run: mvn compile -Perrorprone -DskipTests
+
+      - name: Show Error Prone results on failure
+        if: failure()
+        run: |
+          echo "Error Prone found issues. Check the build output above for details."
