@@ -572,6 +572,9 @@ public class WolfSSL {
     /* lock for cleanup */
     private final Object cleanupLock = new Object();
 
+    /* track if static fields have been initialized from native values */
+    private static boolean staticFieldsInitialized = false;
+
     /* ------------------------ constructors ---------------------------- */
 
     /**
@@ -592,59 +595,65 @@ public class WolfSSL {
                 "Failed to initialize wolfSSL library: " + ret);
         }
 
-        /* Populate NID values from native wolfSSL enums */
-        NID_surname = getNID_surname();
-        NID_serialNumber = getNID_serialNumber();
-        NID_pkcs9_unstructuredName = getNID_pkcs9_unstructuredName();
-        NID_pkcs9_contentType = getNID_pkcs9_contentType();
-        NID_pkcs9_challengePassword = getNID_pkcs9_challengePassword();
-        NID_givenName = getNID_givenName();
-        NID_initials = getNID_initials();
-        NID_key_usage = getNID_key_usage();
-        NID_subject_alt_name = getNID_subject_alt_name();
-        NID_basic_constraints = getNID_basic_constraints();
-        NID_ext_key_usage = getNID_ext_key_usage();
-        NID_dnQualifier = getNID_dnQualifier();
+        /* Populate static fields from native wolfSSL enums only once.
+         * These values are constants from native code and do not change. */
+        if (!staticFieldsInitialized) {
+            /* Populate NID values from native wolfSSL enums */
+            NID_surname = getNID_surname();
+            NID_serialNumber = getNID_serialNumber();
+            NID_pkcs9_unstructuredName = getNID_pkcs9_unstructuredName();
+            NID_pkcs9_contentType = getNID_pkcs9_contentType();
+            NID_pkcs9_challengePassword = getNID_pkcs9_challengePassword();
+            NID_givenName = getNID_givenName();
+            NID_initials = getNID_initials();
+            NID_key_usage = getNID_key_usage();
+            NID_subject_alt_name = getNID_subject_alt_name();
+            NID_basic_constraints = getNID_basic_constraints();
+            NID_ext_key_usage = getNID_ext_key_usage();
+            NID_dnQualifier = getNID_dnQualifier();
 
-        /* initialize cipher enum values */
-        wolfssl_aes         = getBulkCipherAlgorithmEnumAES();
-        wolfssl_cipher_null = getBulkCipherAlgorithmEnumNULL();
-        wolfssl_rc4         = getBulkCipherAlgorithmEnumRC4();
-        wolfssl_rc2         = getBulkCipherAlgorithmEnumRC2();
-        wolfssl_des         = getBulkCipherAlgorithmEnumDES();
-        wolfssl_triple_des  = getBulkCipherAlgorithmEnumDES();
-        wolfssl_des40       = getBulkCipherAlgorithmEnumDES40();
-        wolfssl_aes_gcm     = getBulkCipherAlgorithmEnumAESGCM();
-        wolfssl_aes_ccm     = getBulkCipherAlgorithmEnumAESCCM();
+            /* initialize cipher enum values */
+            wolfssl_aes         = getBulkCipherAlgorithmEnumAES();
+            wolfssl_cipher_null = getBulkCipherAlgorithmEnumNULL();
+            wolfssl_rc4         = getBulkCipherAlgorithmEnumRC4();
+            wolfssl_rc2         = getBulkCipherAlgorithmEnumRC2();
+            wolfssl_des         = getBulkCipherAlgorithmEnumDES();
+            wolfssl_triple_des  = getBulkCipherAlgorithmEnumDES();
+            wolfssl_des40       = getBulkCipherAlgorithmEnumDES40();
+            wolfssl_aes_gcm     = getBulkCipherAlgorithmEnumAESGCM();
+            wolfssl_aes_ccm     = getBulkCipherAlgorithmEnumAESCCM();
 
-        /* initialize cipher enum values */
-        MD5    = getHmacEnumMD5();
-        SHA    = getHmacEnumSHA1();
-        SHA256 = getHmacEnumSHA256();
-        SHA384 = getHmacEnumSHA384();
-        SHA512 = getHmacEnumSHA512();
+            /* initialize cipher enum values */
+            MD5    = getHmacEnumMD5();
+            SHA    = getHmacEnumSHA1();
+            SHA256 = getHmacEnumSHA256();
+            SHA384 = getHmacEnumSHA384();
+            SHA512 = getHmacEnumSHA512();
 
-        /* initialize key type enum values */
-        DSAk     = getKeyTypeEnumDSA();
-        RSAk     = getKeyTypeEnumRSA();
-        ECDSAk   = getKeyTypeEnumECDSA();
-        ED25519k = getKeyTypeEnumED25519();
+            /* initialize key type enum values */
+            DSAk     = getKeyTypeEnumDSA();
+            RSAk     = getKeyTypeEnumRSA();
+            ECDSAk   = getKeyTypeEnumECDSA();
+            ED25519k = getKeyTypeEnumED25519();
 
-        /* initialize TLS 1.3 secret callback ID enums */
-        CLIENT_EARLY_TRAFFIC_SECRET =
-            getTls13SecretEnum_CLIENT_EARLY_TRAFFIC_SECRET();
-        CLIENT_HANDSHAKE_TRAFFIC_SECRET =
-            getTls13SecretEnum_CLIENT_HANDSHAKE_TRAFFIC_SECRET();
-        SERVER_HANDSHAKE_TRAFFIC_SECRET =
-            getTls13SecretEnum_SERVER_HANDSHAKE_TRAFFIC_SECRET();
-        CLIENT_TRAFFIC_SECRET =
-            getTls13SecretEnum_CLIENT_TRAFFIC_SECRET();
-        SERVER_TRAFFIC_SECRET =
-            getTls13SecretEnum_SERVER_TRAFFIC_SECRET();
-        EARLY_EXPORTER_SECRET =
-            getTls13SecretEnum_EARLY_EXPORTER_SECRET();
-        EXPORTER_SECRET =
-            getTls13SecretEnum_EXPORTER_SECRET();
+            /* initialize TLS 1.3 secret callback ID enums */
+            CLIENT_EARLY_TRAFFIC_SECRET =
+                getTls13SecretEnum_CLIENT_EARLY_TRAFFIC_SECRET();
+            CLIENT_HANDSHAKE_TRAFFIC_SECRET =
+                getTls13SecretEnum_CLIENT_HANDSHAKE_TRAFFIC_SECRET();
+            SERVER_HANDSHAKE_TRAFFIC_SECRET =
+                getTls13SecretEnum_SERVER_HANDSHAKE_TRAFFIC_SECRET();
+            CLIENT_TRAFFIC_SECRET =
+                getTls13SecretEnum_CLIENT_TRAFFIC_SECRET();
+            SERVER_TRAFFIC_SECRET =
+                getTls13SecretEnum_SERVER_TRAFFIC_SECRET();
+            EARLY_EXPORTER_SECRET =
+                getTls13SecretEnum_EARLY_EXPORTER_SECRET();
+            EXPORTER_SECRET =
+                getTls13SecretEnum_EXPORTER_SECRET();
+
+            staticFieldsInitialized = true;
+        }
 
         this.active = true;
 
