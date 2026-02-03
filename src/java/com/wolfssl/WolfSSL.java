@@ -25,6 +25,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.FileNotFoundException;
+import java.lang.ref.Reference;
+import java.lang.reflect.Method;
 
 /**
  * Base class which wraps the native WolfSSL embedded SSL library.
@@ -58,6 +60,41 @@ public class WolfSSL {
         DTLSv1_2,
         /** DTLS 1.3 */
         DTLSv1_3
+    }
+
+    /* Reference.reachabilityFence() method, cached via reflection for Java 9+.
+     * Used to prevent premature finalization during native method calls where
+     * needed. Will be null on Java 8 where the method does not exist. */
+    private static final Method reachabilityFenceMethod;
+
+    static {
+        Method m = null;
+        try {
+            m = Reference.class.getMethod("reachabilityFence", Object.class);
+
+        } catch (NoSuchMethodException e) {
+            /* Expected on Java 8, method not available */
+        }
+        reachabilityFenceMethod = m;
+    }
+
+    /**
+     * Can be used to ensure a given object is not garbage collected until
+     * this point. Uses Reference.reachabilityFence() on Java 9+, no-op on
+     * Java 8.
+     *
+     * @param obj the object to keep alive
+     */
+    public static void reachabilityFence(Object obj) {
+
+        if (reachabilityFenceMethod != null) {
+            try {
+                reachabilityFenceMethod.invoke(null, obj);
+
+            } catch (Exception e) {
+                /* Ignore */
+            }
+        }
     }
 
     /* ------------------ wolfSSL JNI error codes ----------------------- */

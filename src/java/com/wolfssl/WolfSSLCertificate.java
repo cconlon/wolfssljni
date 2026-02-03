@@ -1998,6 +1998,7 @@ public class WolfSSLCertificate implements Serializable {
         }
 
         Object[][] fullNames = X509_get_subject_alt_names_full(this.x509Ptr);
+        WolfSSL.reachabilityFence(this);
         if (fullNames == null || fullNames.length == 0) {
             return null;
         }
