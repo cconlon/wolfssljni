@@ -337,6 +337,15 @@ public class WolfSSLParametersHelper
             /* Not available, just ignore and continue */
         }
 
+        /* If input is a WolfSSLParameters, copy PSK-specific fields */
+        if (in instanceof WolfSSLParameters) {
+            WolfSSLParameters wolfIn = (WolfSSLParameters)in;
+            out.setPskClientCb(wolfIn.getPskClientCb());
+            out.setPskServerCb(wolfIn.getPskServerCb());
+            out.setPskIdentityHint(wolfIn.getPskIdentityHint());
+            out.setKeepArrays(wolfIn.getKeepArrays());
+        }
+
     }
 }
 
