@@ -1074,6 +1074,58 @@ JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_Curve448Enabled
 #endif
 }
 
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_PQCEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+#ifdef HAVE_PQC
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLKEMEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+#ifdef WOLFSSL_HAVE_MLKEM
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLDSAEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+#ifdef HAVE_DILITHIUM
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLKEMOldIdsEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+#ifdef WOLFSSL_ML_KEM_USE_OLD_IDS
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
 JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_FileSystemEnabled
   (JNIEnv* jenv, jclass jcl)
 {

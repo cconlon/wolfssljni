@@ -77,6 +77,8 @@ public class Client {
         boolean useSecretCallback = false;    /* enable TLS 1.3 secret cb */
         String keyLogFile = "sslkeylog.log";  /* output keylog file */
 
+        String pqcAlg = null;                 /* PQC named group, -pqc */
+
         long session = 0;                     /* pointer to WOLFSSL_SESSION */
         boolean resumeSession = false;        /* try one session resumption */
 
@@ -219,9 +221,24 @@ public class Client {
                 } else if (arg.equals("-cid")) {
                     useDtlsCid = 1;
 
+                } else if (arg.equals("-pqc")) {
+                    if (args.length < i+2) {
+                        printUsage();
+                    }
+                    pqcAlg = args[++i];
+
                 } else {
                     printUsage();
                 }
+            }
+
+            /* PQC named groups are TLS 1.3 only. Catch the
+             * misconfiguration up front rather than letting native
+             * useKeyShare fail with BAD_FUNC_ARG mid-handshake. */
+            if (pqcAlg != null && sslVersion != 4) {
+                System.out.println("-pqc requires -v 4 (TLS 1.3); " +
+                    "PQC named groups are TLS 1.3 only");
+                System.exit(1);
             }
 
             /* sort out DTLS versus TLS versions */
@@ -279,6 +296,34 @@ public class Client {
 
             /* create context */
             WolfSSLContext sslCtx = new WolfSSLContext(method);
+
+            /* Restrict the TLS supported_groups extension to the single
+             * post-quantum group passed via -pqc, matching the native
+             * wolfSSL example client convention (named --pqc in C).
+             * Errors here are treated as fatal so PQC misconfiguration
+             * is visible during testing. */
+            if (pqcAlg != null) {
+                int pqcGid = WolfSSL.getNamedGroupFromString(pqcAlg);
+                if (pqcGid == WolfSSL.WOLFSSL_NAMED_GROUP_INVALID) {
+                    System.out.println("Unknown -pqc group: " + pqcAlg);
+                    System.exit(1);
+                }
+                System.out.println("PQC enabled in native wolfSSL: " +
+                    WolfSSL.PQCEnabled());
+                System.out.println("ML-KEM enabled: " +
+                    WolfSSL.MLKEMEnabled());
+                System.out.println("ML-DSA enabled: " +
+                    WolfSSL.MLDSAEnabled());
+                System.out.println("ML-KEM legacy IDs accepted: " +
+                    WolfSSL.MLKEMOldIdsEnabled());
+
+                ret = sslCtx.useSupportedCurves(new String[] { pqcAlg });
+                if (ret != WolfSSL.SSL_SUCCESS) {
+                    System.out.println("Failed to set -pqc group " +
+                        pqcAlg + ", ret = " + ret);
+                    System.exit(1);
+                }
+            }
 
             /* set up PSK, if being used */
             if (usePsk == 1) {
@@ -451,6 +496,21 @@ public class Client {
             }
             /* create SSL object */
             ssl = new WolfSSLSession(sslCtx);
+
+            /* Pre-send a TLS 1.3 key share for the -pqc group so we avoid
+             * a HelloRetryRequest if the server picks it. */
+            if (pqcAlg != null) {
+                int gid = WolfSSL.getNamedGroupFromString(pqcAlg);
+                if (WolfSSL.isPQCNamedGroup(gid)) {
+                    ret = ssl.useKeyShare(gid);
+                    if (ret != WolfSSL.SSL_SUCCESS &&
+                        ret != WolfSSL.NOT_COMPILED_IN) {
+                        System.out.println("useKeyShare failed for " +
+                            pqcAlg + ", ret = " + ret);
+                        System.exit(1);
+                    }
+                }
+            }
 
             /* enable/load CRL functionality */
             if (WolfSSL.isEnabledCRL() == 1) {
@@ -906,6 +966,8 @@ public class Client {
             System.out.println("-P\t\tPublic Key Callbacks");
         if (WolfSSL.secretCallbackEnabled())
             System.out.println("-tls13secretcb\tEnable TLS 1.3 secret callback");
+        System.out.println("-pqc <alg>\tKey Share with specified " +
+                "post-quantum algorithm only, e.g. X25519MLKEM768");
         System.exit(1);
     }
 

@@ -323,6 +323,28 @@ extern "C" {
 #define com_wolfssl_WolfSSL_WOLFSSL_FFDHE_6144 259L
 #undef com_wolfssl_WolfSSL_WOLFSSL_FFDHE_8192
 #define com_wolfssl_WolfSSL_WOLFSSL_FFDHE_8192 260L
+#undef com_wolfssl_WolfSSL_WOLFSSL_ML_KEM_512
+#define com_wolfssl_WolfSSL_WOLFSSL_ML_KEM_512 512L
+#undef com_wolfssl_WolfSSL_WOLFSSL_ML_KEM_768
+#define com_wolfssl_WolfSSL_WOLFSSL_ML_KEM_768 513L
+#undef com_wolfssl_WolfSSL_WOLFSSL_ML_KEM_1024
+#define com_wolfssl_WolfSSL_WOLFSSL_ML_KEM_1024 514L
+#undef com_wolfssl_WolfSSL_WOLFSSL_SECP256R1MLKEM768
+#define com_wolfssl_WolfSSL_WOLFSSL_SECP256R1MLKEM768 4587L
+#undef com_wolfssl_WolfSSL_WOLFSSL_X25519MLKEM768
+#define com_wolfssl_WolfSSL_WOLFSSL_X25519MLKEM768 4588L
+#undef com_wolfssl_WolfSSL_WOLFSSL_SECP384R1MLKEM1024
+#define com_wolfssl_WolfSSL_WOLFSSL_SECP384R1MLKEM1024 4589L
+#undef com_wolfssl_WolfSSL_WOLFSSL_SECP256R1MLKEM512
+#define com_wolfssl_WolfSSL_WOLFSSL_SECP256R1MLKEM512 12107L
+#undef com_wolfssl_WolfSSL_WOLFSSL_SECP384R1MLKEM768
+#define com_wolfssl_WolfSSL_WOLFSSL_SECP384R1MLKEM768 12108L
+#undef com_wolfssl_WolfSSL_WOLFSSL_SECP521R1MLKEM1024
+#define com_wolfssl_WolfSSL_WOLFSSL_SECP521R1MLKEM1024 12109L
+#undef com_wolfssl_WolfSSL_WOLFSSL_X25519MLKEM512
+#define com_wolfssl_WolfSSL_WOLFSSL_X25519MLKEM512 12214L
+#undef com_wolfssl_WolfSSL_WOLFSSL_X448MLKEM768
+#define com_wolfssl_WolfSSL_WOLFSSL_X448MLKEM768 12215L
 #undef com_wolfssl_WolfSSL_INVALID_DEVID
 #define com_wolfssl_WolfSSL_INVALID_DEVID -2L
 #undef com_wolfssl_WolfSSL_WOLFSSL_LEFT_MOST_WILDCARD_ONLY
@@ -845,6 +867,38 @@ JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_Curve25519Enabled
  * Signature: ()Z
  */
 JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_Curve448Enabled
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_wolfssl_WolfSSL
+ * Method:    PQCEnabled
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_PQCEnabled
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_wolfssl_WolfSSL
+ * Method:    MLKEMEnabled
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLKEMEnabled
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_wolfssl_WolfSSL
+ * Method:    MLDSAEnabled
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLDSAEnabled
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_wolfssl_WolfSSL
+ * Method:    MLKEMOldIdsEnabled
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLKEMOldIdsEnabled
   (JNIEnv *, jclass);
 
 /*

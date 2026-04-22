@@ -4210,5 +4210,67 @@ public class WolfSSLSessionTest {
             }
         }
     }
+
+    @Test
+    public void test_WolfSSLSession_useKeyShare_PQC()
+        throws WolfSSLJNIException, WolfSSLException {
+
+        /* useKeyShare requires TLS 1.3. PQC named groups require native ML-KEM.
+         * Skip if either is missing in this build. */
+        Assume.assumeTrue(WolfSSL.TLSv13Enabled() && WolfSSL.MLKEMEnabled());
+
+        WolfSSLContext tls13Ctx = null;
+        WolfSSLSession ssl = null;
+
+        try {
+            tls13Ctx = new WolfSSLContext(WolfSSL.TLSv1_3_ClientMethod());
+            ssl = new WolfSSLSession(tls13Ctx);
+
+            /* Standalone ML-KEM-768. May return NOT_COMPILED_IN if wolfssl
+             * was built with WOLFSSL_TLS_NO_MLKEM_STANDALONE or similar. */
+            int ret = ssl.useKeyShare(WolfSSL.WOLFSSL_ML_KEM_768);
+            assertTrue("useKeyShare(WOLFSSL_ML_KEM_768) on TLS 1.3 should " +
+                "return SSL_SUCCESS or NOT_COMPILED_IN, got " + ret,
+                ret == WolfSSL.SSL_SUCCESS || ret == WolfSSL.NOT_COMPILED_IN);
+
+            /* Hybrid SECP256R1MLKEM768 needs only standard ECC on the
+             * classical side, so should succeed in any enable-mlkem build. */
+            ret = ssl.useKeyShare(WolfSSL.WOLFSSL_SECP256R1MLKEM768);
+            assertTrue("useKeyShare(WOLFSSL_SECP256R1MLKEM768) on TLS 1.3 " +
+                "should return SSL_SUCCESS or NOT_COMPILED_IN, got " + ret,
+                ret == WolfSSL.SSL_SUCCESS || ret == WolfSSL.NOT_COMPILED_IN);
+
+        } finally {
+            if (ssl != null) {
+                ssl.freeSSL();
+            }
+            if (tls13Ctx != null) {
+                tls13Ctx.free();
+            }
+        }
+    }
+
+    @Test
+    public void test_WolfSSLSession_useKeyShare_AfterFree_Throws()
+        throws WolfSSLJNIException, WolfSSLException {
+
+        Assume.assumeTrue(WolfSSL.TLSv13Enabled());
+
+        WolfSSLContext tls13Ctx =
+            new WolfSSLContext(WolfSSL.TLSv1_3_ClientMethod());
+        WolfSSLSession ssl = new WolfSSLSession(tls13Ctx);
+        ssl.freeSSL();
+
+        try {
+            ssl.useKeyShare(WolfSSL.WOLFSSL_ML_KEM_768);
+            tls13Ctx.free();
+            fail("useKeyShare() after freeSSL() should throw " +
+                 "IllegalStateException");
+        } catch (IllegalStateException e) {
+            /* expected */
+        }
+
+        tls13Ctx.free();
+    }
 }
 

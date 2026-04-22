@@ -87,6 +87,8 @@ public class ServerJSSE {
         /* set/get enabled protocols */
         String[] protocols = null;
 
+        String pqcAlg = null;                /* PQC named group, -pqc */
+
         try {
 
             /* load WolfSSLprovider */
@@ -168,6 +170,12 @@ public class ServerJSSE {
                 } else if (arg.equals("-ksformat")) {
                     keyStoreFormat = args[++i];
 
+                } else if (arg.equals("-pqc")) {
+                    if (args.length < i+2) {
+                        printUsage();
+                    }
+                    pqcAlg = args[++i];
+
                 } else {
                     printUsage();
                 }
@@ -198,10 +206,27 @@ public class ServerJSSE {
                     System.exit(1);
             }
 
+            /* PQC named groups are TLS 1.3 only. Allow -v 4 (TLS 1.3
+             * explicitly) or -v d (generic "TLS", which can negotiate TLS 1.3.
+             * Reject everything else up front. */
+            if (pqcAlg != null && sslVersion != 4 && sslVersion != -1) {
+                System.out.println("-pqc requires -v 4 (TLS 1.3) or -v d");
+                System.exit(1);
+            }
+
             if (profileSleep) {
                 System.out.println(
                     "Sleeping 10 seconds to allow profiler to attach");
                 Thread.sleep(10000);
+            }
+
+            /* Single -pqc group. wolfJSSE setLocalSupportedCurves uses this
+             * property in server mode to pre-generate a TLS 1.3 key share for
+             * the named PQC group, avoiding HRR if client picks it. */
+            if (pqcAlg != null) {
+                Security.setProperty("wolfjsse.enabledSupportedCurves", pqcAlg);
+                System.out.println("Set wolfjsse.enabledSupportedCurves = " +
+                    pqcAlg);
             }
 
             /* set up keystore and truststore */
@@ -350,6 +375,8 @@ public class ServerJSSE {
         System.out.println("-profile\tSleep for 10 sec before/after running " +
                 "to allow profilers to attach");
         System.out.println("-ksformat <str>\tKeyStore format (default: JKS)");
+        System.out.println("-pqc <alg>\tKey Share with specified " +
+                "post-quantum algorithm only, e.g. X25519MLKEM768");
         System.exit(1);
     }
 

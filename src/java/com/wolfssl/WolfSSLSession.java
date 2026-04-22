@@ -709,6 +709,7 @@ public class WolfSSLSession {
     private native int rehandshake(long ssl);
     private native int set1SigAlgsList(long ssl, String list);
     private native int useSupportedCurve(long ssl, int name);
+    private native int useKeyShare(long ssl, int group);
     private native int disableExtendedMasterSecret(long ssl);
     private native int hasTicket(long session);
     private native int useClientSuites(long ssl);
@@ -2680,6 +2681,37 @@ public class WolfSSLSession {
         }
 
         return ret;
+    }
+
+    /**
+     * Pre-generate a TLS 1.3 key share for the specified named group and
+     * include it in the ClientHello key_share extension. By default, native
+     * wolfSSL only sends key shares for the highest-priority group(s).
+     * For large PQC key shares (ML-KEM and hybrid groups) this typically
+     * forces a HelloRetryRequest round trip when the server selects a
+     * different group than the client guessed.
+     *
+     * Calling this for a PQC named group ensures the key share is sent up
+     * front, avoiding extra round trip when both peers agree on the PQC group.
+     *
+     * @param group named group constant from {@link WolfSSL}, for
+     *              example {@link WolfSSL#WOLFSSL_X25519MLKEM768}.
+     * @return <code>WolfSSL.SSL_SUCCESS</code> on success,
+     *         <code>WolfSSL.NOT_COMPILED_IN</code> if native wolfSSL
+     *         was not built with PQC support, otherwise negative on error.
+     * @throws IllegalStateException WolfSSLSession has been freed
+     */
+    public int useKeyShare(int group) throws IllegalStateException {
+
+        confirmObjectIsActive();
+
+        synchronized (sslLock) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
+                WolfSSLDebug.INFO, this.sslPtr,
+                () -> "entered useKeyShare(" + group + ")");
+
+            return useKeyShare(this.sslPtr, group);
+        }
     }
 
     /**

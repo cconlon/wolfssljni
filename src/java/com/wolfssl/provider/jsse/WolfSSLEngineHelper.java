@@ -260,6 +260,14 @@ public class WolfSSLEngineHelper {
             }
         }
 
+        /* ML-DSA (FIPS 204) certificates, when enabled in native wolfSSL.
+         * Uses the JDK 24 / JEP 497 family name "ML-DSA". KeyManagers surface
+         * the family name regardless of the parameter set (ML-DSA-44/65/87)
+         * of the underlying key. */
+        if (WolfSSL.MLDSAEnabled()) {
+            keyAlgos.add("ML-DSA");
+        }
+
         String[] keyTypes = new String[keyAlgos.size()];
         keyTypes = keyAlgos.toArray(keyTypes);
 
@@ -1362,33 +1370,124 @@ public class WolfSSLEngineHelper {
 
         int ret = 0;
 
-        if (this.clientMode) {
-            /* Get restricted supported curves for ClientHello if set by
-             * user in "wolfjsse.enabledSupportedCurves" Security property */
-            String[] curves = WolfSSLUtil.getSupportedCurves();
+        /* User-restricted curves list, if any. */
+        String[] curves = WolfSSLUtil.getSupportedCurves();
+        if (curves == null) {
+            return;
+        }
 
-            if (curves != null) {
-                ret = this.ssl.useSupportedCurves(curves);
-                if (ret != WolfSSL.SSL_SUCCESS) {
-                    if (ret == WolfSSL.NOT_COMPILED_IN) {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "Unable to set requested TLS Supported " +
-                            "Curves, native support not compiled in.");
-                    }
-                    else {
-                        throw new SSLException(
-                            "Error setting TLS Supported Curves based on " +
-                            "wolfjsse.enabledSupportedCurves property, ret = " +
-                            ret + ", curves: " + Arrays.toString(curves));
-                    }
-                }
-                else {
+        /* Filter PQC named groups out of the list when TLS 1.3 is not in the
+         * enabled protocols. ML-KEM standalone and hybrid groups are TLS 1.3
+         * only. Including them in TLS 1.2 ClientHello supported_groups results
+         * in either an empty effective list after the peer ignores them or,
+         * for our native useKeyShare call, a BAD_FUNC_ARG return. */
+        String[] effectiveCurves =
+            filterPQCGroupsIfNoTLS13(curves, isTLS13Enabled());
+        if (effectiveCurves.length == 0) {
+            /* Every requested group was PQC and TLS 1.3 is off. */
+            return;
+        }
+
+        if (this.clientMode) {
+            /* Restrict the supported_groups extension sent in the ClientHello
+             * to the user's list. */
+            ret = this.ssl.useSupportedCurves(effectiveCurves);
+            if (ret != WolfSSL.SSL_SUCCESS) {
+                if (ret == WolfSSL.NOT_COMPILED_IN) {
                     WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "set TLS Supported Curves based on " +
-                        "wolfjsse.enabledSupportedCurves property");
+                        () -> "Unable to set requested TLS Supported " +
+                        "Curves, native support not compiled in.");
+                    return;
                 }
+                throw new SSLException(
+                    "Error setting TLS Supported Curves based on " +
+                    "wolfjsse.enabledSupportedCurves property, ret = " +
+                    ret + ", curves: " + Arrays.toString(effectiveCurves));
+            }
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                () -> "set TLS Supported Curves based on " +
+                "wolfjsse.enabledSupportedCurves property");
+        }
+
+        /* On both client and server, pre-generate a TLS 1.3 key share for
+         * the first PQC group in the user's list. ML-KEM key shares are
+         * large (1+ KB), so pre-sending lets us avoid the HelloRetryRequest
+         * round trip when both peers agree on that group. NOT_COMPILED_IN
+         * is silently ignored. */
+        for (String curve : effectiveCurves) {
+            int group = WolfSSL.getNamedGroupFromString(curve);
+            if (WolfSSL.isPQCNamedGroup(group)) {
+                int ksRet = this.ssl.useKeyShare(group);
+                final int ksResult = ksRet;
+                final String curveName = curve;
+                if (ksRet == WolfSSL.SSL_SUCCESS) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "pre-sent TLS 1.3 key share for PQC group: " +
+                        curveName);
+                }
+                else if (ksRet != WolfSSL.NOT_COMPILED_IN) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "failed to pre-send key share for PQC group " +
+                        curveName + ", ret = " + ksResult);
+                }
+                break;
             }
         }
+    }
+
+    /**
+     * Returns true if "TLSv1.3" appears in the engine's enabled protocols
+     * list. Used to decide whether PQC named groups are compatible with the
+     * active session.
+     */
+    private boolean isTLS13Enabled() {
+
+        String[] enabled = this.params.getProtocols();
+        if (enabled == null) {
+            return false;
+        }
+        for (String p : enabled) {
+            if ("TLSv1.3".equals(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * If TLS 1.3 is not enabled, returns a copy of {@code curves} with any
+     * PQC standalone or hybrid groups removed (they are TLS 1.3 only). Drops
+     * are logged at INFO. If TLS 1.3 is enabled, the input array is
+     * returned unchanged.
+     */
+    private String[] filterPQCGroupsIfNoTLS13(String[] curves,
+        boolean tls13Enabled) {
+
+        if (tls13Enabled) {
+            return curves;
+        }
+
+        List<String> kept = new ArrayList<String>(curves.length);
+        List<String> dropped = new ArrayList<String>();
+
+        for (String c : curves) {
+            int g = WolfSSL.getNamedGroupFromString(c);
+            if (WolfSSL.isPQCNamedGroup(g)) {
+                dropped.add(c);
+            }
+            else {
+                kept.add(c);
+            }
+        }
+
+        if (!dropped.isEmpty()) {
+            final String dl = dropped.toString();
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                () -> "Filtering PQC named groups out of supported_groups " +
+                "(TLS 1.3 not enabled): " + dl);
+        }
+
+        return kept.toArray(new String[0]);
     }
 
     private void setLocalMaximumPacketSize() {
