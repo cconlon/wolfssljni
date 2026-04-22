@@ -64,6 +64,7 @@ public class Server {
         String cipherList = null;            /* default cipher suite list */
         int sslVersion = 3;                  /* default to TLS 1.2 */
         int verifyPeer = 1;                  /* verify peer by default */
+        int disableCRL = 0;                  /* disable CRL check, -V */
         int doDTLS = 0;                      /* don't use DTLS by default */
         int useOcsp = 0;                     /* don't use OCSP by default */
         String ocspUrl = null;               /* OCSP override URL */
@@ -75,6 +76,8 @@ public class Server {
         int needDH = 0;                      /* toggle for loading DH params */
         int sendPskIdentityHint = 1;         /* toggle sending PSK ident hint */
         int useDtlsCid = 0;                  /* use DTLS CID extension */
+
+        String pqcAlg = null;                /* PQC named group, -pqc */
 
         /* cert info */
         String serverCert = "../certs/server-cert.pem";
@@ -134,6 +137,9 @@ public class Server {
 
                 } else if (arg.equals("-d")) {
                     verifyPeer = 0;
+
+                } else if (arg.equals("-V")) {
+                    disableCRL = 1;
 
                 } else if (arg.equals("-u")) {
                     doDTLS = 1;
@@ -206,9 +212,22 @@ public class Server {
                 } else if (arg.equals("-cid")) {
                     useDtlsCid = 1;
 
+                } else if (arg.equals("-pqc")) {
+                    if (args.length < i+2) {
+                        printUsage();
+                    }
+                    pqcAlg = args[++i];
+
                 } else {
                     printUsage();
                 }
+            }
+
+            /* PQC named groups are TLS 1.3 only */
+            if (pqcAlg != null && sslVersion != 4) {
+                System.out.println("-pqc requires -v 4 (TLS 1.3); PQC named " +
+                    "groups are TLS 1.3 only");
+                System.exit(1);
             }
 
             /* sort out DTLS versus TLS versions */
@@ -266,6 +285,29 @@ public class Server {
 
             /* create context */
             WolfSSLContext sslCtx = new WolfSSLContext(method);
+
+            /* Single -pqc group, restrict the supported_groups extension to
+             * the named group. The server does not pre-generate a TLS 1.3
+             * key share for KEM groups: native wolfSSL encapsulates against
+             * the key share sent by the client instead. */
+            if (pqcAlg != null) {
+                int pqcGid = WolfSSL.getNamedGroupFromString(pqcAlg);
+                if (pqcGid == WolfSSL.WOLFSSL_NAMED_GROUP_INVALID) {
+                    System.out.println("Unknown -pqc group: " + pqcAlg);
+                    System.exit(1);
+                }
+                System.out.println("ML-KEM enabled: " + WolfSSL.MLKEMEnabled());
+                System.out.println("ML-DSA enabled: " + WolfSSL.MLDSAEnabled());
+                System.out.println("ML-KEM legacy IDs accepted: " +
+                    WolfSSL.MLKEMOldIdsEnabled());
+
+                ret = sslCtx.useSupportedCurves(new String[] { pqcAlg });
+                if (ret != WolfSSL.SSL_SUCCESS) {
+                    System.out.println("Failed to set -pqc group " + pqcAlg +
+                        ", ret = " + ret);
+                    System.exit(1);
+                }
+            }
 
             if (usePsk == 1) {
 
@@ -453,8 +495,8 @@ public class Server {
                     }
                 }
 
-                /* enable/load CRL functionality */
-                if (WolfSSL.isEnabledCRL() == 1) {
+                /* Enable/load CRL functionality, unless disabled with -V */
+                if (disableCRL == 0 && WolfSSL.isEnabledCRL() == 1) {
                     ret = ssl.enableCRL(0);
                     if (ret != WolfSSL.SSL_SUCCESS) {
                         System.out.println("failed to enable CRL, ret = "
@@ -778,6 +820,8 @@ public class Server {
         System.out.println("-A <file>\tCertificate Authority file,\tdefault " +
                 "../certs/client-cert.pem");
         System.out.println("-d\t\tDisable peer checks");
+        if (WolfSSL.isEnabledCRL() == 1)
+            System.out.println("-V\t\tDisable CRL");
         if (WolfSSL.isEnabledPSK() == 1)
             System.out.println("-s\t\tUse pre shared keys");
         if (WolfSSL.isEnabledDTLS() == 1)
@@ -799,6 +843,11 @@ public class Server {
             System.out.println("-P\t\tPublic Key Callbacks");
         if (WolfSSL.isEnabledCRLMonitor() == 1)
             System.out.println("-m\t\tEnable CRL directory monitor");
+        if (WolfSSL.MLKEMEnabled()) {
+            System.out.println("-pqc <alg>\tRestrict key exchange to " +
+                    "specified post-quantum group only, " +
+                    "e.g. X25519MLKEM768");
+        }
         System.exit(1);
     }
 

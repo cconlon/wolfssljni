@@ -1500,7 +1500,30 @@ JNIEXPORT jstring JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1get_1signatu
             return (*jenv)->NewStringUTF(jenv, "ED25519");
         case CTC_RSASSAPSS:
             return (*jenv)->NewStringUTF(jenv, "RSASSA-PSS");
-
+#ifdef HAVE_ED448
+        case CTC_ED448:
+            return (*jenv)->NewStringUTF(jenv, "ED448");
+#endif
+#if defined(WOLFSSL_HAVE_MLDSA)
+        /* wolfSSL with ML-DSA naming, after the API rename. */
+        case CTC_ML_DSA_44:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-44");
+        case CTC_ML_DSA_65:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-65");
+        case CTC_ML_DSA_87:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-87");
+#elif defined(HAVE_DILITHIUM) && LIBWOLFSSL_VERSION_HEX >= 0x05007004
+        /* Released wolfSSL with legacy Dilithium naming. The
+         * CTC_ML_DSA_LEVEL* names exist from wolfSSL 5.7.4, the first
+         * release able to parse final ML-DSA OID certificates. Releases
+         * <= 5.7.2 only know draft Dilithium OIDs. */
+        case CTC_ML_DSA_LEVEL2:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-44");
+        case CTC_ML_DSA_LEVEL3:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-65");
+        case CTC_ML_DSA_LEVEL5:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-87");
+#endif
         default:
             throwWolfSSLJNIException(jenv, "Unknown signature type");
             return NULL;
@@ -1877,7 +1900,17 @@ JNIEXPORT jstring JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1get_1pubkey_
         case DSAk:
             return (*jenv)->NewStringUTF(jenv, "DSA");
         case ED25519k:
+        case ED448k:
             return (*jenv)->NewStringUTF(jenv, "EdDSA");
+        case RSAPSSk:
+            return (*jenv)->NewStringUTF(jenv, "RSASSA-PSS");
+#if defined(WOLFSSL_HAVE_MLDSA) || \
+    (defined(HAVE_DILITHIUM) && LIBWOLFSSL_VERSION_HEX >= 0x05007004)
+        case ML_DSA_LEVEL2k:
+        case ML_DSA_LEVEL3k:
+        case ML_DSA_LEVEL5k:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA");
+#endif
         default:
             throwWolfSSLJNIException(jenv, "Unknown public key type");
             return NULL;

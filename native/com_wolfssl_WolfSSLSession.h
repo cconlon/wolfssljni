@@ -1041,6 +1041,14 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useSupportedCurve
 
 /*
  * Class:     com_wolfssl_WolfSSLSession
+ * Method:    useKeyShare
+ * Signature: (JI)I
+ */
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useKeyShare
+  (JNIEnv *, jobject, jlong, jint);
+
+/*
+ * Class:     com_wolfssl_WolfSSLSession
  * Method:    disableExtendedMasterSecret
  * Signature: (J)I
  */

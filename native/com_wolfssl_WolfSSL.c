@@ -1118,6 +1118,47 @@ JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_Curve448Enabled
 #endif
 }
 
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLKEMEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+#ifdef WOLFSSL_HAVE_MLKEM
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLDSAEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+    /* Final ML-DSA (FIPS 204) OID support requires wolfSSL 5.7.4 or later */
+#if defined(WOLFSSL_HAVE_MLDSA) || \
+    (defined(HAVE_DILITHIUM) && LIBWOLFSSL_VERSION_HEX >= 0x05007004)
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_MLKEMOldIdsEnabled
+  (JNIEnv* jenv, jclass jcl)
+{
+    (void)jenv;
+    (void)jcl;
+
+#ifdef WOLFSSL_ML_KEM_USE_OLD_IDS
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
 JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_FileSystemEnabled
   (JNIEnv* jenv, jclass jcl)
 {

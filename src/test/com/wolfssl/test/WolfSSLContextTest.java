@@ -362,10 +362,11 @@ public class WolfSSLContextTest {
 
         int ret;
         String[] singleEccSecp256r1 = new String[] { "secp256r1" };
-        String[] allEccCurves =  new String[] {
-            "secp160k1", "secp160r1", "secp160r2", "secp192k1", "secp192r1",
-            "secp224k1", "secp224r1", "secp256k1", "secp256r1", "secp384r1",
-            "secp521r1"
+        String[] commonEccCurves =  new String[] {
+            "secp256r1", "secp384r1", "secp521r1"
+        };
+        String[] containsUnknownCurve = new String[] {
+            "bogus_curve_name", "secp256r1"
         };
         String[] x25519Curve = new String[] { "x25519" };
         String[] x448Curve = new String[] { "x448" };
@@ -376,10 +377,18 @@ public class WolfSSLContextTest {
                 ret != WolfSSL.NOT_COMPILED_IN) {
                 fail("useSupportedCurves(singleEccSecp256r1) failed");
             }
-            ret = ctx.useSupportedCurves(allEccCurves);
+            ret = ctx.useSupportedCurves(commonEccCurves);
             if (ret != WolfSSL.SSL_SUCCESS &&
                 ret != WolfSSL.NOT_COMPILED_IN) {
-                fail("useSupportedCurves(allEccCurves) failed");
+                fail("useSupportedCurves(commonEccCurves) failed");
+            }
+            /* An unknown curve name must surface as an error, even when a
+             * later entry in the list succeeds. Valid entries are still
+             * appended (best-effort), but the first error is returned. */
+            ret = ctx.useSupportedCurves(containsUnknownCurve);
+            if (ret == WolfSSL.SSL_SUCCESS) {
+                fail("useSupportedCurves(containsUnknownCurve) should " +
+                     "not return SSL_SUCCESS");
             }
             if (WolfSSL.Curve25519Enabled()) {
                 ret = ctx.useSupportedCurves(x25519Curve);
@@ -424,6 +433,13 @@ public class WolfSSLContextTest {
                 if (ret != WolfSSL.NOT_COMPILED_IN &&
                     ret != WolfSSL.SSL_SUCCESS) {
                     fail("setGroups() failed with WOLFSSL_ECC_SECP256R1");
+                }
+                if (ret == WolfSSL.NOT_COMPILED_IN &&
+                    WolfSSL.TLSv13Enabled() &&
+                    ctx.useSupportedCurves(new String[] { "secp256r1" })
+                        == WolfSSL.SSL_SUCCESS) {
+                    fail("setGroups() returned NOT_COMPILED_IN on a " +
+                        "TLS 1.3 build with supported-curves available");
                 }
                 ret = ctx.setGroups(twoItems);
                 if (ret != WolfSSL.NOT_COMPILED_IN &&

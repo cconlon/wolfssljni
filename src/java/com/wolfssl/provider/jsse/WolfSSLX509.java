@@ -594,6 +594,8 @@ public class WolfSSLX509 extends X509Certificate {
                 kf = KeyFactory.getInstance("EC");
             } else if (type.equals("DSA")) {
                 kf = KeyFactory.getInstance("DSA");
+            } else if (type.equals("ML-DSA")) {
+                kf = KeyFactory.getInstance("ML-DSA");
             }
 
             if (kf != null) {

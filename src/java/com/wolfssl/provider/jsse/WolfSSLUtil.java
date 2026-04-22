@@ -23,6 +23,7 @@ package com.wolfssl.provider.jsse;
 import java.util.List;
 import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import java.io.FileInputStream;
@@ -249,10 +250,10 @@ public class WolfSSLUtil {
         sigSchemes = sigSchemes.trim();
         String[] schemes = sigSchemes.split(",");
 
-        /* Tokenize scheme components and convert to signature
-           algorithm format */
+        /* Tokenize scheme components and convert to signature algo format */
         for (String scheme : schemes) {
-            scheme = scheme.toUpperCase();
+            /* Locale.ROOT for locale-independent case conversion of protocol */
+            scheme = scheme.toUpperCase(Locale.ROOT);
             if (scheme.isEmpty()) {
                 continue;
             }
@@ -268,10 +269,29 @@ public class WolfSSLUtil {
                         sigAlgList.add(algorithm);
                     }
                     continue;
-                } else {
-                    /* Invalid format, skip */
-                    continue;
                 }
+                /* Map ML-DSA spellings to the FIPS 204 name "ML-DSA-NN" used
+                 * by native wolfSSL. Accept the compact IETF SignatureScheme
+                 * spelling "mldsa44/65/87" (as used in
+                 * jdk.tls.{client,server}.SignatureSchemes) and the canonical
+                 * name itself, as advertised by
+                 * getLocalSupportedSignatureAlgorithms(). Both derive from
+                 * the shared WolfSSL.ML_DSA_PARAM_SET_NAMES list. */
+                String mldsaCanonical = null;
+                String compact = algorithm.replace("-", "");
+                for (String name : WolfSSL.ML_DSA_PARAM_SET_NAMES) {
+                    if (algorithm.equals(name) ||
+                        compact.equals(name.replace("-", ""))) {
+                        mldsaCanonical = name;
+                        break;
+                    }
+                }
+                if (mldsaCanonical != null &&
+                    !sigAlgList.contains(mldsaCanonical)) {
+                    sigAlgList.add(mldsaCanonical);
+                }
+                /* Otherwise invalid format, skip */
+                continue;
             }
 
             if (schemeComp.length < 2) {
@@ -405,16 +425,50 @@ public class WolfSSLUtil {
     }
 
     /**
-     * Return TLS Supported Curves allowed if set in
-     * wolfjsse.enabledSupportedCurves system Security property.
+     * Split a comma-separated property value into tokens, trimming whitespace
+     * around each token and dropping empty tokens.
      *
-     * @return String array of Supported Curves to be set into the
-     *         TLS ClientHello.
+     * Returns an empty array (not null) when the input contains no non-empty
+     * tokens (ex: only commas/whitespace), so callers can distinguish an
+     * explicitly set but unusable value from an unset property and fail
+     * closed instead of silently ignoring it.
+     *
+     * @param list comma-separated String, must not be null
+     *
+     * @return String array of trimmed tokens, empty array if no non-empty
+     *         tokens remain
+     */
+    protected static String[] splitCommaList(String list) {
+
+        String[] tokens = list.split(",");
+        ArrayList<String> out = new ArrayList<String>(tokens.length);
+
+        for (String tok : tokens) {
+            tok = tok.trim();
+            if (!tok.isEmpty()) {
+                out.add(tok);
+            }
+        }
+
+        return out.toArray(new String[out.size()]);
+    }
+
+    /**
+     * Return TLS supported groups to be set in the supported_groups extension,
+     * as configured by the wolfJSSE {@code wolfjsse.enabledSupportedCurves}
+     * Security property.
+     *
+     * <p>This is the lowest-precedence named-groups configuration source.
+     * {@code SSLParameters.setNamedGroups()} (JDK 20, JDK-8281236) and the
+     * {@code jdk.tls.namedGroups} System property both override it. Only
+     * a single source is applied per session. The restriction applies to
+     * both client and server mode.
+     *
+     * @return String array of named groups, or null if property unset.
      */
     protected static String[] getSupportedCurves() {
 
-        String curves =
-            Security.getProperty("wolfjsse.enabledSupportedCurves");
+        String curves = Security.getProperty("wolfjsse.enabledSupportedCurves");
 
         if (curves == null || curves.isEmpty()) {
             return null;
@@ -422,14 +476,38 @@ public class WolfSSLUtil {
 
         final String tmpCurves = curves;
         WolfSSLDebug.log(WolfSSLUtil.class, WolfSSLDebug.INFO,
-            () -> "restricting enabled ClientHello supported curves");
+            () -> "restricting enabled supported groups");
         WolfSSLDebug.log(WolfSSLUtil.class, WolfSSLDebug.INFO,
             () -> "wolfjsse.enabledSupportedCurves: " + tmpCurves);
 
-        /* Remove spaces between commas if present */
-        curves = curves.replaceAll(", ", ",");
+        return splitCommaList(curves);
+    }
 
-        return curves.split(",");
+    /**
+     * Return TLS named groups to be set in the supported_groups extension,
+     * as configured by the JSSE {@code jdk.tls.namedGroups} System property.
+     *
+     * <p>{@code SSLParameters.setNamedGroups()} takes precedence over this
+     * System property. This property takes precedence over the
+     * {@code wolfjsse.enabledSupportedCurves} Security property. The
+     * restriction applies to both client and server mode, matching SunJSSE
+     * behavior on JDK 20+.
+     *
+     * @return String array of named groups, or null if property unset.
+     */
+    protected static String[] getJdkTlsNamedGroups() {
+
+        String groups = System.getProperty("jdk.tls.namedGroups");
+
+        if (groups == null || groups.isEmpty()) {
+            return null;
+        }
+
+        final String tmpGroups = groups;
+        WolfSSLDebug.log(WolfSSLUtil.class, WolfSSLDebug.INFO,
+            () -> "jdk.tls.namedGroups: " + tmpGroups);
+
+        return splitCommaList(groups);
     }
 
     /**

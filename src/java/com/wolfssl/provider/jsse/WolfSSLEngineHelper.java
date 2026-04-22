@@ -24,6 +24,8 @@ import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.Socket;
@@ -114,6 +116,21 @@ public class WolfSSLEngineHelper {
      * Java_com_wolfssl_WolfSSLSession_freeSSL(). Deleting the native
      * global reference allows the Java object to be garbage collected. */
     private WolfSSLInternalVerifyCb wicb = null;
+
+    /* Effective enabled protocols for this session, computed by
+     * applyConfiguredCipherProtocolSettings() during session setup
+     * (after jdk.tls.disabledAlgorithms sanitization and cipher-suite-based
+     * protocol filtering). Read by isTLS13Enabled() for PQC named-group
+     * decisions. */
+    private String[] effectiveProtocols = null;
+
+    /* Cache of per-token native wolfSSL_set1_sigalgs_list() probe results,
+     * keyed by native-format sigalg token (ex: "ECDSA+SHA256", "ML-DSA-44").
+     * Native support is fixed once the shared library has been loaded, so
+     * verdicts never change for the life of the process. Used by
+     * applyToSignatureAlgorithms(). */
+    private static final Map<String, Boolean> sigAlgProbeCache =
+        new ConcurrentHashMap<String, Boolean>();
 
     /**
      * Private helper method to get System and Security properties.
@@ -260,6 +277,20 @@ public class WolfSSLEngineHelper {
             }
         }
 
+        /* ML-DSA (FIPS 204) certificates, when enabled in native wolfSSL.
+         * Try the JDK 24 / JEP 497 family name "ML-DSA" first, which
+         * wolfJSSE's own X509KeyManager matches against any parameter set.
+         * Also try the parameter-set names (ML-DSA-44/65/87): third-party
+         * KeyManagers (JDK SunX509/NewSunX509, BCJSSE) match keyType
+         * exactly against PublicKey.getAlgorithm(), and Bouncy Castle
+         * ML-DSA keys report the parameter-set name, not the family name. */
+        if (WolfSSL.MLDSAEnabled()) {
+            keyAlgos.add("ML-DSA");
+            keyAlgos.add("ML-DSA-44");
+            keyAlgos.add("ML-DSA-65");
+            keyAlgos.add("ML-DSA-87");
+        }
+
         String[] keyTypes = new String[keyAlgos.size()];
         keyTypes = keyAlgos.toArray(keyTypes);
 
@@ -334,7 +365,6 @@ public class WolfSSLEngineHelper {
         throws WolfSSLException, CertificateEncodingException, IOException {
 
         int ret;
-        int offset;
         final String alias;       /* KeyStore alias holding private key */
         X509KeyManager km = null;  /* X509KeyManager from KeyStore */
 
@@ -359,23 +389,28 @@ public class WolfSSLEngineHelper {
 
         if (privKey != null) {
             byte[] privKeyEncoded = privKey.getEncoded();
-            byte[] privKeyTraditional = null;
             try {
-                if (!privKey.getFormat().equals("PKCS#8")) {
+                if (privKeyEncoded == null) {
+                    throw new WolfSSLException(
+                        "Private key getEncoded() returned null, key may " +
+                        "have been destroyed (alias: " + alias + ")");
+                }
+
+                if (!"PKCS#8".equals(privKey.getFormat())) {
                     throw new WolfSSLException(
                         "Private key is not in PKCS#8 format");
                 }
 
-                /* Skip past PKCS#8 offset */
-                offset = WolfSSL.getPkcs8TraditionalOffset(privKeyEncoded, 0,
-                    privKeyEncoded.length);
-
-                privKeyTraditional = Arrays.copyOfRange(privKeyEncoded,
-                    offset, privKeyEncoded.length);
-
+                /* Pass the full PKCS#8 buffer to native wolfSSL for all
+                 * key types. The per-algorithm native decoders detect and
+                 * skip the PKCS#8 header themselves (RSA/ECC since at
+                 * least wolfSSL 5.0.0), so no Java-side stripping is
+                 * needed. For ML-DSA the PKCS#8 AlgorithmIdentifier is
+                 * also what tells native which parameter set (44/65/87)
+                 * to use, so it must not be stripped. */
                 try {
-                    ret = this.ssl.usePrivateKeyBuffer(privKeyTraditional,
-                        privKeyTraditional.length, WolfSSL.SSL_FILETYPE_ASN1);
+                    ret = this.ssl.usePrivateKeyBuffer(privKeyEncoded,
+                        privKeyEncoded.length, WolfSSL.SSL_FILETYPE_ASN1);
                 } catch (WolfSSLJNIException e) {
                     throw new WolfSSLException(e);
                 }
@@ -391,9 +426,6 @@ public class WolfSSLEngineHelper {
             } finally {
                 if (privKeyEncoded != null) {
                     Arrays.fill(privKeyEncoded, (byte)0);
-                }
-                if (privKeyTraditional != null) {
-                    Arrays.fill(privKeyTraditional, (byte)0);
                 }
             }
         } else {
@@ -980,6 +1012,8 @@ public class WolfSSLEngineHelper {
             this.params.getProtocols(), WolfSSL.TLS_VERSION.INVALID);
         protocols = getEffectiveProtocolsForCiphers(protocols, suites);
 
+        this.effectiveProtocols = protocols;
+
         this.setLocalCiphers(suites);
         this.setLocalProtocol(protocols);
     }
@@ -1321,74 +1355,335 @@ public class WolfSSLEngineHelper {
         }
     }
 
-    private void setLocalSigAlgorithms() {
+    private void setLocalSigAlgorithms() throws SSLException {
 
-        int ret = 0;
         String sigAlgos = null;
         String sigSchemes = null;
         String cleanSigList = null;
+        String source = null;
 
-        if (this.clientMode) {
-            /* Get restricted signature algorithms for ClientHello if set by
-             * user in "wolfjsse.enabledSigAlgorithms" Security property */
-            sigAlgos = WolfSSLUtil.getSignatureAlgorithms();
+        /* SSLParameters.setSignatureSchemes() (JDK 19, JDK-8280494),
+         * accessed via reflection to retain Java 8 compatibility, takes
+         * precedence over the System/Security property configuration when
+         * set, matching SunJSSE. */
+        String[] paramSchemes =
+            WolfSSLParametersHelper.getSignatureSchemesFromParams(this.params);
+
+        if (paramSchemes != null) {
+            if (paramSchemes.length == 0) {
+                /* An empty array means no signature schemes are allowed. Fail
+                 * closed rather than silently falling back to defaults. */
+                throw new SSLException(
+                    "SSLParameters.setSignatureSchemes() set to an empty " +
+                    "array, no signature schemes allowed");
+            }
+            sigSchemes = String.join(",", paramSchemes);
+            source = "SSLParameters.setSignatureSchemes()";
         }
-        sigSchemes =
-            WolfSSLUtil.getSignatureSchemes(this.clientMode);
-        cleanSigList =
-            WolfSSLUtil.formatSigSchemes(sigAlgos, sigSchemes);
+        else {
+            if (this.clientMode) {
+                /* Get restricted signature algorithms for ClientHello if
+                 * set by user in "wolfjsse.enabledSignatureAlgorithms"
+                 * Security property */
+                sigAlgos = WolfSSLUtil.getSignatureAlgorithms();
+            }
+            sigSchemes = WolfSSLUtil.getSignatureSchemes(this.clientMode);
 
-        if (cleanSigList != null) {
-            ret = this.ssl.setSignatureAlgorithms(cleanSigList);
+            if (sigAlgos != null && sigSchemes != null) {
+                source = "\"wolfjsse.enabledSignatureAlgorithms\" and " +
+                    "\"jdk.tls." + (this.clientMode ? "client" : "server") +
+                    ".SignatureSchemes\" properties";
+            }
+            else if (sigAlgos != null) {
+                source = "\"wolfjsse.enabledSignatureAlgorithms\" " +
+                    "Security property";
+            }
+            else {
+                source = "\"jdk.tls." +
+                    (this.clientMode ? "client" : "server") +
+                    ".SignatureSchemes\" System property";
+            }
+        }
 
-            if (ret != WolfSSL.SSL_SUCCESS &&
-                ret != WolfSSL.NOT_COMPILED_IN) {
+        cleanSigList = WolfSSLUtil.formatSigSchemes(sigAlgos, sigSchemes);
+        if (cleanSigList == null) {
+            /* No signature scheme or algorithm restriction configured */
+            return;
+        }
+
+        applyToSignatureAlgorithms(cleanSigList, source);
+    }
+
+    /**
+     * Apply a colon-separated list of native-format signature algorithm
+     * tokens to the native wolfSSL session, ignoring tokens not supported
+     * by the native build.
+     *
+     * Matches the JDK signature-schemes contract. The JDK 19+
+     * SSLParameters.setSignatureSchemes() javadoc states "Providers should
+     * ignore unknown signature scheme names while establishing the
+     * SSL/TLS/DTLS connections". Native wolfSSL_set1_sigalgs_list() is
+     * all-or-nothing, one unsupported entry rejects an entire list, so
+     * each token is probed individually first and unsupported tokens (ex:
+     * ML-DSA names on a native parser that does not accept them yet, or
+     * RSA schemes on a build without RSA) are skipped with an INFO log.
+     * Every native call resets the previous sigalg configuration, which makes
+     * sequential probing safe, the final call with the surviving tokens is the
+     * one that takes effect. SSLException is thrown only when no usable tokens
+     * remain, matching SunJSSE behavior when a restriction yields no supported
+     * schemes.
+     *
+     * @param sigList colon-separated native-format signature algorithm
+     *                token list (ex: "ECDSA+SHA256:ML-DSA-44")
+     * @param source human-readable label used in log/error messages to
+     *               identify which configuration produced the list
+     *
+     * @throws SSLException when no usable signature algorithms remain
+     *         after filtering unsupported tokens
+     */
+    private void applyToSignatureAlgorithms(String sigList, String source)
+        throws SSLException {
+
+        List<String> applied = new ArrayList<String>();
+        List<String> skipped = new ArrayList<String>();
+
+        for (String tok : sigList.split(":")) {
+            final String token = tok.trim();
+            if (token.isEmpty()) {
+                continue;
+            }
+
+            Boolean supported = sigAlgProbeCache.get(token);
+            if (supported == null) {
+                int ret = this.ssl.setSignatureAlgorithms(token);
+                if (ret == WolfSSL.NOT_COMPILED_IN) {
+                    /* Native sigalg list API not compiled in, nothing can
+                     * be applied for any token. */
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "Unable to restrict signature algorithms, " +
+                        "native support not compiled in.");
+                    return;
+                }
+                supported = Boolean.valueOf(ret == WolfSSL.SSL_SUCCESS);
+                sigAlgProbeCache.put(token, supported);
+            }
+
+            if (supported.booleanValue()) {
+                applied.add(token);
+            }
+            else {
+                skipped.add(token);
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "error restricting signature algorithms based " +
-                    "on \"wolfjsse.enabledSigAlgorithms\" and " +
-                    "\"jdk.tls."+ (this.clientMode ? "client" : "server") +
-                    ".SignatureSchemes\" properties");
-            } else if (ret == WolfSSL.SSL_SUCCESS) {
+                    () -> "ignoring signature scheme \"" + token +
+                    "\" in " + source + ", not supported by native wolfSSL");
+            }
+        }
+
+        if (applied.isEmpty()) {
+            /* Explicitly configured but no token is usable with this native
+             * wolfSSL build. Fail rather than silently using native default
+             * signature algorithms, matching SunJSSE behavior when a
+             * restriction yields no supported schemes. */
+            throw new SSLException(source + " contains no supported " +
+                "signature schemes: " + sigList);
+        }
+
+        int ret = this.ssl.setSignatureAlgorithms(String.join(":", applied));
+        if (ret != WolfSSL.SSL_SUCCESS) {
+            /* Unexpected, every token was accepted individually. Possible
+             * only if the combined list overflows the native maximum
+             * (WOLFSSL_MAX_SIGALGO). */
+            throw new SSLException("Error setting signature algorithms " +
+                "from " + source + ", ret = " + ret + ", list: " + applied);
+        }
+
+        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+            () -> "restricted signature algorithms from " + source + ": " +
+            applied + (skipped.isEmpty() ? "" : ", ignored: " + skipped));
+    }
+
+    /**
+     * Apply TLS supported_groups (named groups) configuration to the native
+     * session, selecting a single configuration source in order of precedence:
+     *
+     * 1. SSLParameters.setNamedGroups(), added in JDK 20 (JDK-8281236),
+     *    accessed via reflection to retain Java 8 compatibility.
+     * 2. jdk.tls.namedGroups System property.
+     * 3. wolfjsse.enabledSupportedCurves Security property.
+     *
+     * Only the highest-precedence source that is set is applied. An explicit
+     * SSLParameters value replaces property configuration rather than
+     * accumulating with it, and the JDK System property overrides the wolfJSSE
+     * Security property. All sources apply in both client and server mode,
+     * matching SunJSSE behavior for jdk.tls.namedGroups on JDK 20+.
+     */
+    private void setLocalSupportedGroups() throws SSLException {
+
+        String[] groups =
+            WolfSSLParametersHelper.getNamedGroupsFromParams(this.params);
+        if (groups != null) {
+            applyToSupportedGroupsExtension(groups,
+                "SSLParameters.setNamedGroups()");
+            return;
+        }
+
+        groups = WolfSSLUtil.getJdkTlsNamedGroups();
+        if (groups != null) {
+            applyToSupportedGroupsExtension(groups,
+                "jdk.tls.namedGroups System property");
+            return;
+        }
+
+        groups = WolfSSLUtil.getSupportedCurves();
+        if (groups != null) {
+            applyToSupportedGroupsExtension(groups,
+                "wolfjsse.enabledSupportedCurves Security property");
+        }
+    }
+
+    /**
+     * Apply a list of named-group tokens to the TLS supported_groups
+     * extension on the native wolfSSL session.
+     *
+     * Matches the JDK named-groups contract. The JDK 20+
+     * SSLParameters.setNamedGroups() javadoc states "Providers should ignore
+     * unknown named group scheme names while establishing the SSL/TLS/DTLS
+     * connections", and SunJSSE applies the same skip semantics to
+     * jdk.tls.namedGroups. Unrecognized tokens, groups not supported by the
+     * native wolfSSL build, and PQC groups on a session without (D)TLS 1.3
+     * are all ignored with an INFO log. SSLException is thrown only when no
+     * usable groups remain after filtering, matching SunJSSE behavior when
+     * jdk.tls.namedGroups contains no supported named groups.
+     *
+     * @param groups list of named-group tokens to apply
+     * @param source human-readable label used in log/error messages to
+     *               identify which configuration produced the list
+     *
+     * @throws SSLException when no usable named groups remain after
+     *         filtering unknown and unsupported tokens
+     */
+    private void applyToSupportedGroupsExtension(String[] groups,
+        String source) throws SSLException {
+
+        boolean tls13Enabled = isTLS13Enabled();
+        List<String> applied = new ArrayList<String>(groups.length);
+        List<String> skipped = new ArrayList<String>();
+        int firstGroupId = WolfSSL.WOLFSSL_NAMED_GROUP_INVALID;
+        String firstGroupName = null;
+
+        for (String name : groups) {
+            int id = WolfSSL.getNamedGroupFromString(name);
+            if (id == WolfSSL.WOLFSSL_NAMED_GROUP_INVALID) {
+                /* Ignore unknown tokens */
+                skipped.add(name);
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "restricted signature algorithms based on " +
-                    "on \"wolfjsse.enabledSigAlgorithms\" and " +
-                    "\"jdk.tls."+ (this.clientMode ? "client" : "server") +
-                    ".SignatureSchemes\" properties");
+                    () -> "ignoring unrecognized named group \"" + name +
+                    "\" in " + source);
+                continue;
+            }
+
+            /* PQC (ML-KEM standalone and hybrid) groups are TLS 1.3 only.
+             * Drop them when (D)TLS 1.3 is not an enabled protocol so they
+             * are not offered in a TLS 1.2 ClientHello. */
+            if (!tls13Enabled && WolfSSL.isPQCNamedGroup(id)) {
+                skipped.add(name);
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "ignoring PQC named group \"" + name + "\" in " +
+                    source + ", (D)TLS 1.3 not enabled");
+                continue;
+            }
+
+            int ret = this.ssl.useSupportedCurves(new int[] { id });
+            if (ret == WolfSSL.NOT_COMPILED_IN) {
+                /* supported_groups extension not compiled into native
+                 * wolfSSL, nothing can be applied for any group. */
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "Unable to set supported_groups, native " +
+                    "support not compiled in.");
+                return;
+            }
+            else if (ret != WolfSSL.SSL_SUCCESS) {
+                /* Ignore groups this native wolfSSL build rejects */
+                skipped.add(name);
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "ignoring named group \"" + name + "\" in " +
+                    source + ", not supported by native wolfSSL build, " +
+                    "ret = " + ret);
+                continue;
+            }
+
+            if (applied.isEmpty()) {
+                firstGroupId = id;
+                firstGroupName = name;
+            }
+            applied.add(name);
+        }
+
+        if (applied.isEmpty()) {
+            /* Named groups were explicitly configured but none are usable
+             * for this session. Fail rather than silently falling back to
+             * native defaults, matching SunJSSE which throws when
+             * jdk.tls.namedGroups contains no supported named groups. */
+            throw new SSLException(source + " contains no supported named " +
+                "groups: " + Arrays.toString(groups));
+        }
+
+        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+            () -> "set TLS supported_groups from " + source + ": " + applied +
+            (skipped.isEmpty() ? "" : ", ignored: " + skipped));
+
+        /* On the client, pre-generate a TLS 1.3 key share for the user's
+         * most-preferred (first) usable group. When no key share has been
+         * generated up front, native wolfSSL sends a key share for its own
+         * build-default group, which may not match the configured preference
+         * order (groups are applied here one at a time with
+         * wolfSSL_UseSupportedCurve(), which does not populate native's group
+         * ranking). Pre-generating makes the ClientHello key share follow the
+         * configured order, avoiding a HelloRetryRequest round trip when the
+         * server honors client preference. Servers do not pre-generate key
+         * shares: native wolfSSL_UseKeyShare() is a no-op for PQC groups on
+         * the server side, which encapsulates against the client public key
+         * instead of generating its own keypair. */
+        if (this.clientMode && tls13Enabled) {
+            int ksRet = this.ssl.useKeyShare(firstGroupId);
+            final String name = firstGroupName;
+            if (ksRet == WolfSSL.SSL_SUCCESS) {
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "pre-generated TLS 1.3 key share for group: " + name);
+            }
+            else if (ksRet != WolfSSL.NOT_COMPILED_IN) {
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "failed to pre-generate key share for group " + name +
+                    ", ret = " + ksRet);
             }
         }
     }
 
-    private void setLocalSupportedCurves() throws SSLException {
+    /**
+     * Returns true if TLS 1.3 or DTLS 1.3 is part of the effective enabled
+     * protocols list for this session, as computed by
+     * applyConfiguredCipherProtocolSettings() earlier in the same
+     * setLocalParams() pass (jdk.tls.disabledAlgorithms sanitization plus
+     * cipher-suite-based protocol filtering). Used to decide whether PQC
+     * named groups are compatible with the active session.
+     */
+    private boolean isTLS13Enabled() {
 
-        int ret = 0;
+        String[] enabled = this.effectiveProtocols;
 
-        if (this.clientMode) {
-            /* Get restricted supported curves for ClientHello if set by
-             * user in "wolfjsse.enabledSupportedCurves" Security property */
-            String[] curves = WolfSSLUtil.getSupportedCurves();
+        if (enabled == null || enabled.length == 0) {
+            /* Effective protocol list not computed or empty, defer to
+             * native wolfSSL TLS 1.3 availability */
+            return WolfSSL.TLSv13Enabled();
+        }
 
-            if (curves != null) {
-                ret = this.ssl.useSupportedCurves(curves);
-                if (ret != WolfSSL.SSL_SUCCESS) {
-                    if (ret == WolfSSL.NOT_COMPILED_IN) {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "Unable to set requested TLS Supported " +
-                            "Curves, native support not compiled in.");
-                    }
-                    else {
-                        throw new SSLException(
-                            "Error setting TLS Supported Curves based on " +
-                            "wolfjsse.enabledSupportedCurves property, ret = " +
-                            ret + ", curves: " + Arrays.toString(curves));
-                    }
-                }
-                else {
-                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "set TLS Supported Curves based on " +
-                        "wolfjsse.enabledSupportedCurves property");
-                }
+        for (String p : enabled) {
+            if ("TLSv1.3".equals(p) || "DTLSv1.3".equals(p)) {
+                return true;
             }
         }
+
+        return false;
     }
 
     private void setLocalMaximumPacketSize() {
@@ -1528,7 +1823,7 @@ public class WolfSSLEngineHelper {
         this.setLocalAlpnProtocols();
         this.setLocalSecureRenegotiation();
         this.setLocalSigAlgorithms();
-        this.setLocalSupportedCurves();
+        this.setLocalSupportedGroups();
         this.setLocalMaximumPacketSize();
         this.setLocalExtendedMasterSecret();
         this.setLocalPskSettings();
