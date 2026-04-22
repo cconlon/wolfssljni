@@ -6459,6 +6459,30 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useSupportedCurve
 #endif
 }
 
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useKeyShare
+  (JNIEnv* jenv, jobject jcl, jlong sslPtr, jint group)
+{
+#ifdef WOLFSSL_TLS13
+    int ret = 0;
+    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
+    (void)jcl;
+
+    if (jenv == NULL || ssl == NULL) {
+        return (jint)SSL_FAILURE;
+    }
+
+    ret = wolfSSL_UseKeyShare(ssl, (word16)group);
+
+    return (jint)ret;
+#else
+    (void)jenv;
+    (void)jcl;
+    (void)sslPtr;
+    (void)group;
+    return (jint)NOT_COMPILED_IN;
+#endif
+}
+
 JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_disableExtendedMasterSecret
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {

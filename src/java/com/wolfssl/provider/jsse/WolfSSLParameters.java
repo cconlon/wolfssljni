@@ -127,6 +127,14 @@ public class WolfSSLParameters extends SSLParameters {
         cp.setSNIMatchers(this.getSNIMatchers());
         cp.setServerNames(this.getServerNames());
 
+        /* SSLParameters.setNamedGroups() (added in JDK 20, JDK-8281236).
+         * Round-trip via reflection so this compiles on Java 8 baseline,
+         * otherwise no-op. */
+        String[] ng = WolfSSLParametersHelper.getNamedGroupsFromParams(this);
+        if (ng != null) {
+            WolfSSLParametersHelper.setNamedGroupsOnParams(cp, ng);
+        }
+
         return cp;
     }
 

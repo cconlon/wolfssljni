@@ -566,7 +566,7 @@ and used by wolfSSL JNI/JSSE.
 | wolfssl.readWriteByteBufferPool.size | 16 | Integer | Sets the read/write per-thread ByteBuffer pool size |
 | wolfssl.readWriteByteBufferPool.bufferSize | 17408 | String | Sets the read/write per-thread ByteBuffer size |
 | wolfjsse.enabledCipherSuites | | String | Restricts enabled cipher suites |
-| wolfjsse.enabledSupportedCurves | | String | Restricts enabled ECC curves |
+| wolfjsse.enabledSupportedCurves | | String | Restricts enabled named groups (ECC curves and PQC/hybrid groups) |
 | wolfjsse.enabledSignatureAlgorithms | | String | Restricts enabled signature algorithms |
 | wolfjsse.keystore.type.required | | String | Restricts KeyStore type |
 | wolfjsse.clientSessionCache.disabled | | "true" | Disables client session cache |
@@ -617,14 +617,22 @@ changing this property. This should be a comma-delimited String. Example use:
 wolfjsse.enabledCipherSuites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 ```
 
-**wolfjsse.enabledSupportedCurves (String)** - Allows setting of specific ECC
-curves to be enabled for SSL/TLS connections. This propogates down to the native
+**wolfjsse.enabledSupportedCurves (String)** - Allows setting of specific
+named groups (ECC curves and post-quantum / hybrid groups such as ML-KEM)
+to be enabled for SSL/TLS connections. This propagates down to the native
 wolfSSL API `wolfSSL_UseSupportedCurve()`. If invalid/bad values are found
 when processing this property, connection establishment will fail with an
-SSLException. This should be a comma-delimited String. Example use:
+SSLException. This should be a comma-delimited String. Both compact
+(`MLKEM768`, `X25519MLKEM768`) and IETF (`ML-KEM-768`, `SecP256r1MLKEM768`)
+spellings are recognized for PQC and hybrid groups when native wolfSSL was
+built with `--enable-mlkem`. Example use:
 
 ```
 wolfjsse.enabledSupportedCurves=secp256r1, secp521r1
+```
+
+```
+wolfjsse.enabledSupportedCurves=X25519MLKEM768, SecP256r1MLKEM768, ML-KEM-768
 ```
 
 **wolfjsse.enabledSignatureAlgorithms (String)** - Allows restriction of the
@@ -636,6 +644,14 @@ String of signature algorithm + MAC combinations. Example use:
 
 ```
 wolfjsse.enabledSignatureAlgorithms=RSA+SHA256:ECDSA+SHA256
+```
+
+Standalone scheme tokens (no MAC component) are also accepted, including
+ED25519, ED448, and the FIPS 204 ML-DSA names (`ML-DSA-44`, `ML-DSA-65`,
+`ML-DSA-87`) when native wolfSSL was built with `--enable-mldsa`:
+
+```
+wolfjsse.enabledSignatureAlgorithms=ML-DSA-87:ECDSA+SHA384
 ```
 
 **wolfjsse.keystore.type.required (String)** - Can be used to specify a KeyStore
@@ -723,6 +739,18 @@ advertised and used by the server if set.
 
 **jdk.tls.client.SignatureSchemes (String)** - Controls which signature algorithms are
 advertised and used by the client if set.
+
+**jdk.tls.namedGroups (String)** - Comma-delimited list of TLS named groups
+to advertise. Honored alongside `SSLParameters.setNamedGroups()` API (added in
+JDK 20, JDK-8281236) and the `wolfjsse.enabledSupportedCurves` Security
+property. Recognizes both classical curves (`secp256r1`, `secp384r1`) and
+PQC / hybrid groups (`X25519MLKEM768`, `SecP256r1MLKEM768`, `ML-KEM-768`) when
+native wolfSSL was built with `--enable-mlkem`. `SSLParameters.setNamedGroups()`
+takes precedence over this property when both are set.
+
+```
+java -Djdk.tls.namedGroups=X25519MLKEM768,secp256r1 ...
+```
 
 **jdk.tls.useExtendedMasterSecret (boolean)** - Can be used to enable or
 disable the use of the Extended Master Secret (EMS) extension. This extension

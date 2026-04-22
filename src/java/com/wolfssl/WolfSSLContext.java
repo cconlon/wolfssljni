@@ -2364,7 +2364,7 @@ public class WolfSSLContext {
      * @return <code>WolfSSL.SSL_SUCCESS</code> on success, otherwise negative
      *         value on error. BAD_FUNC_ARG when groups is null, not using
      *         TLS 1.3 or size is greater than WOLFSSL_MAX_GROUP_COUNT (which
-     *         defaults to 10, unless HAVE_PQC is defined then is 36.
+     *         defaults to 10, unless WOLFSSL_HAVE_MLKEM is defined then is 36.
      * @throws IllegalStateException WolfSSLContext has been freed
      */
     public int setGroups(int[] groups)

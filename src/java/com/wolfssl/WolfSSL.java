@@ -588,6 +588,36 @@ public class WolfSSL {
     /** FFDHE 8192 */
     public static final int WOLFSSL_FFDHE_8192    = 260;
 
+    /* ----------------- ML-KEM (FIPS 203) Named Groups ----------------- */
+    /** ML-KEM-512 (FIPS 203, NIST Security Category 1) */
+    public static final int WOLFSSL_ML_KEM_512  = 512;
+    /** ML-KEM-768 (FIPS 203, NIST Security Category 3) */
+    public static final int WOLFSSL_ML_KEM_768  = 513;
+    /** ML-KEM-1024 (FIPS 203, NIST Security Category 5, CNSA 2.0) */
+    public static final int WOLFSSL_ML_KEM_1024 = 514;
+
+    /* Hybrid IETF final codepoints (draft-ietf-tls-ecdhe-mlkem). */
+    /** Hybrid SECP256R1 + ML-KEM-768 (IETF final codepoint 0x11EB) */
+    public static final int WOLFSSL_SECP256R1MLKEM768  = 4587;
+    /** Hybrid X25519 + ML-KEM-768 (IETF final codepoint 0x11EC) */
+    public static final int WOLFSSL_X25519MLKEM768     = 4588;
+    /** Hybrid SECP384R1 + ML-KEM-1024 (IETF final codepoint 0x11ED,
+     *  CNSA 2.0 with hybrid bridge) */
+    public static final int WOLFSSL_SECP384R1MLKEM1024 = 4589;
+
+    /* Hybrid OQS-assigned codepoints (legacy interop).
+     * No IETF-final equivalents exist for these combinations. */
+    /** Hybrid SECP256R1 + ML-KEM-512 (OQS codepoint) */
+    public static final int WOLFSSL_SECP256R1MLKEM512  = 12107;
+    /** Hybrid SECP384R1 + ML-KEM-768 (OQS codepoint) */
+    public static final int WOLFSSL_SECP384R1MLKEM768  = 12108;
+    /** Hybrid SECP521R1 + ML-KEM-1024 (OQS codepoint) */
+    public static final int WOLFSSL_SECP521R1MLKEM1024 = 12109;
+    /** Hybrid X25519 + ML-KEM-512 (OQS codepoint) */
+    public static final int WOLFSSL_X25519MLKEM512     = 12214;
+    /** Hybrid X448 + ML-KEM-768 (OQS codepoint) */
+    public static final int WOLFSSL_X448MLKEM768       = 12215;
+
     /* -------------------- Crypto Callback DevID ----------------------- */
     /** Invalid DevID value, when used as devId software crypto is used */
     public static final int INVALID_DEVID = -2;
@@ -1095,6 +1125,37 @@ public class WolfSSL {
      * @return true if enabled, otherwise false if not compiled in.
      */
     public static native boolean Curve448Enabled();
+
+    /**
+     * Tests if ML-KEM (FIPS 203, formerly Kyber) support has been
+     * compiled into native wolfSSL library.
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean MLKEMEnabled();
+
+    /**
+     * Tests if ML-DSA (FIPS 204, formerly Dilithium) support has been
+     * compiled into native wolfSSL library (HAVE_DILITHIUM).
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean MLDSAEnabled();
+
+    /**
+     * Tests if native wolfSSL was built with WOLFSSL_ML_KEM_USE_OLD_IDS.
+     * When enabled, the server accepts the pre-IETF-final legacy hybrid
+     * ML-KEM codepoints in addition to the IETF final codepoints exposed
+     * as {@link #WOLFSSL_X25519MLKEM768}, {@link #WOLFSSL_SECP256R1MLKEM768},
+     * and {@link #WOLFSSL_SECP384R1MLKEM1024}. The legacy codepoints are not
+     * exposed as Java constants because wolfJSSE always sends only the
+     * IETF final codepoints in ClientHello regardless of this setting. It is
+     * purely a server-side compatibility flag for accepting older clients
+     * still using the draft codepoints.
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean MLKEMOldIdsEnabled();
 
     /**
      * Tests if filesystem support has been compiled into the wolfSSL library.
@@ -1941,7 +2002,7 @@ public class WolfSSL {
      *         String, or WolfSSL.WOLFSSL_NAMED_GROUP_INVALID if curve
      *         String not supported.
      */
-    protected static int getNamedGroupFromString(String curveName) {
+    public static int getNamedGroupFromString(String curveName) {
 
         switch (curveName) {
             case "sect163k1":
@@ -2018,9 +2079,75 @@ public class WolfSSL {
                 return WolfSSL.WOLFSSL_FFDHE_6144;
             case "ffdhe8192":
                 return WolfSSL.WOLFSSL_FFDHE_8192;
+            /* ML-KEM standalone (FIPS 203). Accept both the FIPS 203 spelling
+             * ("ML-KEM-N", per JDK 24 JEP 496 standard algo name registration)
+             * and the compact form. */
+            case "MLKEM512":
+            case "ML-KEM-512":
+                return WolfSSL.WOLFSSL_ML_KEM_512;
+            case "MLKEM768":
+            case "ML-KEM-768":
+                return WolfSSL.WOLFSSL_ML_KEM_768;
+            case "MLKEM1024":
+            case "ML-KEM-1024":
+                return WolfSSL.WOLFSSL_ML_KEM_1024;
+            /* Hybrid IETF final codepoints. The IETF / IANA spellings use
+             * mixed case ("SecP256r1MLKEM768", "SecP384r1MLKEM1024"). Accept
+             * all caps variants too for usability. */
+            case "X25519MLKEM768":
+                return WolfSSL.WOLFSSL_X25519MLKEM768;
+            case "SecP256r1MLKEM768":
+            case "SECP256R1MLKEM768":
+                return WolfSSL.WOLFSSL_SECP256R1MLKEM768;
+            case "SecP384r1MLKEM1024":
+            case "SECP384R1MLKEM1024":
+                return WolfSSL.WOLFSSL_SECP384R1MLKEM1024;
+            /* Hybrid OQS-assigned codepoints (legacy interop). */
+            case "SECP256R1MLKEM512":
+                return WolfSSL.WOLFSSL_SECP256R1MLKEM512;
+            case "SECP384R1MLKEM768":
+                return WolfSSL.WOLFSSL_SECP384R1MLKEM768;
+            case "SECP521R1MLKEM1024":
+                return WolfSSL.WOLFSSL_SECP521R1MLKEM1024;
+            case "X25519MLKEM512":
+                return WolfSSL.WOLFSSL_X25519MLKEM512;
+            case "X448MLKEM768":
+                return WolfSSL.WOLFSSL_X448MLKEM768;
             default:
                 return WolfSSL.WOLFSSL_NAMED_GROUP_INVALID;
 
+        }
+    }
+
+    /**
+     * Returns true if the given native named-group enum value identifies
+     * a post-quantum (ML-KEM) standalone or PQ/T hybrid TLS 1.3 group.
+     *
+     * @param namedGroup native named-group enum value, typically the
+     *                   result of {@link #getNamedGroupFromString(String)}
+     *                   or one of the WOLFSSL_ML_KEM_* / WOLFSSL_*MLKEM*
+     *                   constants on this class.
+     * @return true if the group is a PQC standalone or hybrid TLS 1.3
+     *         named group, false otherwise (including for
+     *         {@link #WOLFSSL_NAMED_GROUP_INVALID} and any non-PQC
+     *         named group).
+     */
+    public static boolean isPQCNamedGroup(int namedGroup) {
+        switch (namedGroup) {
+            case WOLFSSL_ML_KEM_512:
+            case WOLFSSL_ML_KEM_768:
+            case WOLFSSL_ML_KEM_1024:
+            case WOLFSSL_X25519MLKEM768:
+            case WOLFSSL_SECP256R1MLKEM768:
+            case WOLFSSL_SECP384R1MLKEM1024:
+            case WOLFSSL_SECP256R1MLKEM512:
+            case WOLFSSL_SECP384R1MLKEM768:
+            case WOLFSSL_SECP521R1MLKEM1024:
+            case WOLFSSL_X25519MLKEM512:
+            case WOLFSSL_X448MLKEM768:
+                return true;
+            default:
+                return false;
         }
     }
 

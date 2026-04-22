@@ -249,8 +249,7 @@ public class WolfSSLUtil {
         sigSchemes = sigSchemes.trim();
         String[] schemes = sigSchemes.split(",");
 
-        /* Tokenize scheme components and convert to signature
-           algorithm format */
+        /* Tokenize scheme components and convert to signature algo format */
         for (String scheme : schemes) {
             scheme = scheme.toUpperCase();
             if (scheme.isEmpty()) {
@@ -268,10 +267,29 @@ public class WolfSSLUtil {
                         sigAlgList.add(algorithm);
                     }
                     continue;
-                } else {
-                    /* Invalid format, skip */
+                }
+                /* Map the compact IETF SignatureScheme spelling "MLDSA44/65/87"
+                 * (as accepted in jdk.tls.{client,server}.SignatureSchemes) to
+                 * the canonical FIPS 204 name "ML-DSA-44/65/87" used by
+                 * native wolfSSL. */
+                String mldsaCanonical = null;
+                if (algorithm.equals("MLDSA44")) {
+                    mldsaCanonical = "ML-DSA-44";
+                }
+                else if (algorithm.equals("MLDSA65")) {
+                    mldsaCanonical = "ML-DSA-65";
+                }
+                else if (algorithm.equals("MLDSA87")) {
+                    mldsaCanonical = "ML-DSA-87";
+                }
+                if (mldsaCanonical != null) {
+                    if (!sigAlgList.contains(mldsaCanonical)) {
+                        sigAlgList.add(mldsaCanonical);
+                    }
                     continue;
                 }
+                /* Invalid format, skip */
+                continue;
             }
 
             if (schemeComp.length < 2) {
@@ -405,16 +423,22 @@ public class WolfSSLUtil {
     }
 
     /**
-     * Return TLS Supported Curves allowed if set in
-     * wolfjsse.enabledSupportedCurves system Security property.
+     * Return TLS supported curves to be set in the supported_groups extension,
+     * as configured by wolfJSSE {@code wolfjsse.enabledSupportedCurves}
+     * Security property.
      *
-     * @return String array of Supported Curves to be set into the
-     *         TLS ClientHello.
+     * <p>For the broader TLS 1.3 named-groups configuration (the JSSE
+     * {@code jdk.tls.namedGroups} System property and
+     * {@code SSLParameters.setNamedGroups()} API added in JDK 20
+     * (JDK-8281236)), see {@link #getJdkTlsNamedGroups()} and
+     * {@link WolfSSLParametersHelper#getNamedGroupsFromParams}. Each
+     * source is read and applied independently.
+     *
+     * @return String array of named groups, or null if property unset.
      */
     protected static String[] getSupportedCurves() {
 
-        String curves =
-            Security.getProperty("wolfjsse.enabledSupportedCurves");
+        String curves = Security.getProperty("wolfjsse.enabledSupportedCurves");
 
         if (curves == null || curves.isEmpty()) {
             return null;
@@ -430,6 +454,33 @@ public class WolfSSLUtil {
         curves = curves.replaceAll(", ", ",");
 
         return curves.split(",");
+    }
+
+    /**
+     * Return TLS named groups to be set in the supported_groups extension,
+     * as configured by the JSSE {@code jdk.tls.namedGroups} System property.
+     *
+     * <p>{@code SSLParameters.setNamedGroups()} takes precedence over this
+     * System property.
+     *
+     * @return String array of named groups, or null if property unset.
+     */
+    protected static String[] getJdkTlsNamedGroups() {
+
+        String groups = System.getProperty("jdk.tls.namedGroups");
+
+        if (groups == null || groups.isEmpty()) {
+            return null;
+        }
+
+        final String tmpGroups = groups;
+        WolfSSLDebug.log(WolfSSLUtil.class, WolfSSLDebug.INFO,
+            () -> "jdk.tls.namedGroups: " + tmpGroups);
+
+        /* Remove spaces between commas if present */
+        groups = groups.replaceAll(", ", ",");
+
+        return groups.split(",");
     }
 
     /**

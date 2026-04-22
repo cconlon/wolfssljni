@@ -1113,6 +1113,11 @@ public class WolfSSLImplementSSLSession extends ExtendedSSLSession {
         if (WolfSSL.RsaPssEnabled()) {
             algs.add("RSASSA-PSS");
         }
+        if (WolfSSL.MLDSAEnabled()) {
+            algs.add("ML-DSA-44");
+            algs.add("ML-DSA-65");
+            algs.add("ML-DSA-87");
+        }
 
         return algs.toArray(new String[algs.size()]);
     }

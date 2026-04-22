@@ -372,4 +372,135 @@ public class WolfSSLTest {
             System.clearProperty("wolfssl.skipLibraryLoad");
         }
     }
+
+    @Test
+    public void test_PQC_NamedGroup_Constants() {
+
+        /* Values must match wolfssl/ssl.h enum exactly. Drift here would
+         * cause silent codepoint mismatch. */
+        assertEquals(512,   WolfSSL.WOLFSSL_ML_KEM_512);
+        assertEquals(513,   WolfSSL.WOLFSSL_ML_KEM_768);
+        assertEquals(514,   WolfSSL.WOLFSSL_ML_KEM_1024);
+
+        assertEquals(4587,  WolfSSL.WOLFSSL_SECP256R1MLKEM768);
+        assertEquals(4588,  WolfSSL.WOLFSSL_X25519MLKEM768);
+        assertEquals(4589,  WolfSSL.WOLFSSL_SECP384R1MLKEM1024);
+
+        assertEquals(12107, WolfSSL.WOLFSSL_SECP256R1MLKEM512);
+        assertEquals(12108, WolfSSL.WOLFSSL_SECP384R1MLKEM768);
+        assertEquals(12109, WolfSSL.WOLFSSL_SECP521R1MLKEM1024);
+        assertEquals(12214, WolfSSL.WOLFSSL_X25519MLKEM512);
+        assertEquals(12215, WolfSSL.WOLFSSL_X448MLKEM768);
+    }
+
+    @Test
+    public void test_getNamedGroupFromString_PQC() {
+
+        /* ML-KEM standalone: both compact ("MLKEMN") and FIPS 203 standard
+         * name ("ML-KEM-N") spellings */
+        assertEquals(WolfSSL.WOLFSSL_ML_KEM_512,
+            WolfSSL.getNamedGroupFromString("MLKEM512"));
+        assertEquals(WolfSSL.WOLFSSL_ML_KEM_512,
+            WolfSSL.getNamedGroupFromString("ML-KEM-512"));
+        assertEquals(WolfSSL.WOLFSSL_ML_KEM_768,
+            WolfSSL.getNamedGroupFromString("MLKEM768"));
+        assertEquals(WolfSSL.WOLFSSL_ML_KEM_768,
+            WolfSSL.getNamedGroupFromString("ML-KEM-768"));
+        assertEquals(WolfSSL.WOLFSSL_ML_KEM_1024,
+            WolfSSL.getNamedGroupFromString("MLKEM1024"));
+        assertEquals(WolfSSL.WOLFSSL_ML_KEM_1024,
+            WolfSSL.getNamedGroupFromString("ML-KEM-1024"));
+
+        /* IETF hybrids: IANA mixed-case ("SecP256r1MLKEM768") and the all caps
+         * variants we accept */
+        assertEquals(WolfSSL.WOLFSSL_X25519MLKEM768,
+            WolfSSL.getNamedGroupFromString("X25519MLKEM768"));
+        assertEquals(WolfSSL.WOLFSSL_SECP256R1MLKEM768,
+            WolfSSL.getNamedGroupFromString("SecP256r1MLKEM768"));
+        assertEquals(WolfSSL.WOLFSSL_SECP256R1MLKEM768,
+            WolfSSL.getNamedGroupFromString("SECP256R1MLKEM768"));
+        assertEquals(WolfSSL.WOLFSSL_SECP384R1MLKEM1024,
+            WolfSSL.getNamedGroupFromString("SecP384r1MLKEM1024"));
+        assertEquals(WolfSSL.WOLFSSL_SECP384R1MLKEM1024,
+            WolfSSL.getNamedGroupFromString("SECP384R1MLKEM1024"));
+
+        /* OQS hybrids */
+        assertEquals(WolfSSL.WOLFSSL_SECP256R1MLKEM512,
+            WolfSSL.getNamedGroupFromString("SECP256R1MLKEM512"));
+        assertEquals(WolfSSL.WOLFSSL_SECP384R1MLKEM768,
+            WolfSSL.getNamedGroupFromString("SECP384R1MLKEM768"));
+        assertEquals(WolfSSL.WOLFSSL_SECP521R1MLKEM1024,
+            WolfSSL.getNamedGroupFromString("SECP521R1MLKEM1024"));
+        assertEquals(WolfSSL.WOLFSSL_X25519MLKEM512,
+            WolfSSL.getNamedGroupFromString("X25519MLKEM512"));
+        assertEquals(WolfSSL.WOLFSSL_X448MLKEM768,
+            WolfSSL.getNamedGroupFromString("X448MLKEM768"));
+
+        /* Unknown / typo / null-equivalent fall through to INVALID */
+        assertEquals(WolfSSL.WOLFSSL_NAMED_GROUP_INVALID,
+            WolfSSL.getNamedGroupFromString("X25519MLKEM"));
+        assertEquals(WolfSSL.WOLFSSL_NAMED_GROUP_INVALID,
+            WolfSSL.getNamedGroupFromString("nonsense"));
+        assertEquals(WolfSSL.WOLFSSL_NAMED_GROUP_INVALID,
+            WolfSSL.getNamedGroupFromString(""));
+
+        /* Existing classical curves still resolve correctly. */
+        assertEquals(WolfSSL.WOLFSSL_ECC_X25519,
+            WolfSSL.getNamedGroupFromString("X25519"));
+        assertEquals(WolfSSL.WOLFSSL_ECC_SECP256R1,
+            WolfSSL.getNamedGroupFromString("secp256r1"));
+    }
+
+    @Test
+    public void test_isPQCNamedGroup() {
+
+        /* All PQC standalone + hybrids return true. */
+        assertTrue(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_ML_KEM_512));
+        assertTrue(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_ML_KEM_768));
+        assertTrue(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_ML_KEM_1024));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_X25519MLKEM768));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_SECP256R1MLKEM768));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_SECP384R1MLKEM1024));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_SECP256R1MLKEM512));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_SECP384R1MLKEM768));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_SECP521R1MLKEM1024));
+        assertTrue(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_X25519MLKEM512));
+        assertTrue(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_X448MLKEM768));
+
+        /* Classical curves and FFDHE return false. */
+        assertFalse(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_ECC_X25519));
+        assertFalse(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_ECC_SECP256R1));
+        assertFalse(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_ECC_SECP384R1));
+        assertFalse(WolfSSL.isPQCNamedGroup(WolfSSL.WOLFSSL_FFDHE_2048));
+
+        /* Sentinel and out-of-range integers return false. */
+        assertFalse(WolfSSL.isPQCNamedGroup(
+            WolfSSL.WOLFSSL_NAMED_GROUP_INVALID));
+        assertFalse(WolfSSL.isPQCNamedGroup(0));
+        assertFalse(WolfSSL.isPQCNamedGroup(99999));
+        assertFalse(WolfSSL.isPQCNamedGroup(-1));
+    }
+
+    @Test
+    public void test_PQC_FeatureDetect_NativeReturns() {
+
+        /* Each native call should be reachable and return a boolean
+         * consistent with the build. The only invariant we can assert is
+         * that native calls returned without crashing. Reference variables
+         * to silence "unused" warnings on older toolchains. */
+        boolean mlkem  = WolfSSL.MLKEMEnabled();
+        boolean mldsa  = WolfSSL.MLDSAEnabled();
+        boolean oldIds = WolfSSL.MLKEMOldIdsEnabled();
+
+        if (mlkem || mldsa || oldIds) {
+            /* nothing */
+        }
+    }
 }

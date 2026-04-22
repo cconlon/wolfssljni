@@ -76,6 +76,8 @@ public class Server {
         int sendPskIdentityHint = 1;         /* toggle sending PSK ident hint */
         int useDtlsCid = 0;                  /* use DTLS CID extension */
 
+        String pqcAlg = null;                /* PQC named group, -pqc */
+
         /* cert info */
         String serverCert = "../certs/server-cert.pem";
         String serverKey  = "../certs/server-key.pem";
@@ -206,9 +208,22 @@ public class Server {
                 } else if (arg.equals("-cid")) {
                     useDtlsCid = 1;
 
+                } else if (arg.equals("-pqc")) {
+                    if (args.length < i+2) {
+                        printUsage();
+                    }
+                    pqcAlg = args[++i];
+
                 } else {
                     printUsage();
                 }
+            }
+
+            /* PQC named groups are TLS 1.3 only */
+            if (pqcAlg != null && sslVersion != 4) {
+                System.out.println("-pqc requires -v 4 (TLS 1.3); PQC named " +
+                    "groups are TLS 1.3 only");
+                System.exit(1);
             }
 
             /* sort out DTLS versus TLS versions */
@@ -266,6 +281,29 @@ public class Server {
 
             /* create context */
             WolfSSLContext sslCtx = new WolfSSLContext(method);
+
+            /* Single -pqc group, restrict the supported_groups extension to
+             * the named group and pre-generate a TLS 1.3 key share for that
+             * group per-session below so handshake completes without a
+             * HelloRetryRequest when the client picks it. */
+            if (pqcAlg != null) {
+                int pqcGid = WolfSSL.getNamedGroupFromString(pqcAlg);
+                if (pqcGid == WolfSSL.WOLFSSL_NAMED_GROUP_INVALID) {
+                    System.out.println("Unknown -pqc group: " + pqcAlg);
+                    System.exit(1);
+                }
+                System.out.println("ML-KEM enabled: " + WolfSSL.MLKEMEnabled());
+                System.out.println("ML-DSA enabled: " + WolfSSL.MLDSAEnabled());
+                System.out.println("ML-KEM legacy IDs accepted: " +
+                    WolfSSL.MLKEMOldIdsEnabled());
+
+                ret = sslCtx.useSupportedCurves(new String[] { pqcAlg });
+                if (ret != WolfSSL.SSL_SUCCESS) {
+                    System.out.println("Failed to set -pqc group " + pqcAlg +
+                        ", ret = " + ret);
+                    System.exit(1);
+                }
+            }
 
             if (usePsk == 1) {
 
@@ -443,6 +481,22 @@ public class Server {
 
                 /* create SSL object */
                 WolfSSLSession ssl = new WolfSSLSession(sslCtx);
+
+                /* Pre-generate TLS 1.3 key share for the -pqc group so the
+                 * server can respond immediately if the client picks it,
+                 * completing handshake without a HRR round trip. */
+                if (pqcAlg != null) {
+                    int gid = WolfSSL.getNamedGroupFromString(pqcAlg);
+                    if (WolfSSL.isPQCNamedGroup(gid)) {
+                        ret = ssl.useKeyShare(gid);
+                        if (ret != WolfSSL.SSL_SUCCESS &&
+                            ret != WolfSSL.NOT_COMPILED_IN) {
+                            System.out.println("useKeyShare failed for " +
+                                pqcAlg + ", ret = " + ret);
+                            System.exit(1);
+                        }
+                    }
+                }
 
                 if (usePsk == 0 || cipherList != null || needDH == 1) {
                     ret = ssl.setTmpDHFile(dhParam, WolfSSL.SSL_FILETYPE_PEM);
@@ -799,6 +853,10 @@ public class Server {
             System.out.println("-P\t\tPublic Key Callbacks");
         if (WolfSSL.isEnabledCRLMonitor() == 1)
             System.out.println("-m\t\tEnable CRL directory monitor");
+        if (WolfSSL.MLKEMEnabled()) {
+            System.out.println("-pqc <alg>\tKey Share with specified " +
+                    "post-quantum algorithm only, e.g. X25519MLKEM768");
+        }
         System.exit(1);
     }
 

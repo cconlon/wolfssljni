@@ -45,6 +45,8 @@ public class WolfSSLParametersHelper
     private static Method setMaximumPacketSize = null;
     private static Method setUseCipherSuitesOrder = null;
     private static Method getUseCipherSuitesOrder = null;
+    private static Method getNamedGroups = null;
+    private static Method setNamedGroups = null;
 
     /** Default WolfSSLParametersHelper constructor */
     public WolfSSLParametersHelper() { }
@@ -98,6 +100,12 @@ public class WolfSSLParametersHelper
                                     continue;
                                 case "getUseCipherSuitesOrder":
                                     getUseCipherSuitesOrder = m;
+                                    continue;
+                                case "getNamedGroups":
+                                    getNamedGroups = m;
+                                    continue;
+                                case "setNamedGroups":
+                                    setNamedGroups = m;
                                     continue;
                                 default:
                                     continue;
@@ -210,6 +218,15 @@ public class WolfSSLParametersHelper
         try {
             if (setUseCipherSuitesOrder != null) {
                 ret.setUseCipherSuitesOrder(in.getUseCipherSuitesOrder());
+            }
+        } catch (Exception e) {
+            /* Not available, just ignore and continue */
+        }
+
+        try {
+            String[] groups = getNamedGroupsFromParams(in);
+            if (groups != null) {
+                setNamedGroupsOnParams(ret, groups);
             }
         } catch (Exception e) {
             /* Not available, just ignore and continue */
@@ -337,6 +354,15 @@ public class WolfSSLParametersHelper
             /* Not available, just ignore and continue */
         }
 
+        try {
+            String[] groups = getNamedGroupsFromParams(in);
+            if (groups != null) {
+                setNamedGroupsOnParams(out, groups);
+            }
+        } catch (Exception e) {
+            /* Not available, just ignore and continue */
+        }
+
         /* If input is a WolfSSLParameters, copy wolfJSSE specific fields
          * that are not part of the standard SSLParameters API */
         if (in instanceof WolfSSLParameters) {
@@ -374,6 +400,54 @@ public class WolfSSLParametersHelper
             if (!hasStdSni) {
                 out.setWolfSSLServerNames(null);
             }
+        }
+    }
+
+    /**
+     * Reflective accessor for SSLParameters.getNamedGroups(). Returns the
+     * named groups array if the host JDK has the method and the application
+     * set a value, otherwise null.
+     *
+     * @param in SSLParameters instance to read from (may be null)
+     * @return cloned named-groups array, or null if unset / unavailable
+     */
+    public static String[] getNamedGroupsFromParams(SSLParameters in) {
+
+        if (in == null || getNamedGroups == null) {
+            return null;
+        }
+
+        try {
+            Object val = getNamedGroups.invoke(in);
+            if (val instanceof String[]) {
+                String[] arr = (String[]) val;
+                return arr.clone();
+            }
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            /* fall through to null */
+        }
+
+        return null;
+    }
+
+    /**
+     * Reflective mutator for SSLParameters.setNamedGroups(). Noop when the
+     * host JDK does not expose the method.
+     *
+     * @param out SSLParameters instance to write to (must be non-null)
+     * @param groups named-groups array to set (may be null to clear)
+     */
+    public static void setNamedGroupsOnParams(SSLParameters out,
+        String[] groups) {
+
+        if (out == null || setNamedGroups == null) {
+            return;
+        }
+
+        try {
+            setNamedGroups.invoke(out, (Object) groups);
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            /* Noop on failure */
         }
     }
 }

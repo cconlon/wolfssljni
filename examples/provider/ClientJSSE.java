@@ -105,6 +105,8 @@ public class ClientJSSE {
         byte[] firstSessionId = null;         /* sess ID of first session */
         byte[] resumeSessionId = null;        /* sess ID of resumed session */
 
+        String pqcAlg = null;                 /* PQC named group, -pqc */
+
         /* cert info */
         String clientJKS  = "../provider/client.jks";
         String caJKS      = "../provider/ca-server.jks";
@@ -204,6 +206,12 @@ public class ClientJSSE {
             } else if (arg.equals("-ksformat")) {
                 keyStoreFormat = args[++i];
 
+            } else if (arg.equals("-pqc")) {
+                if (args.length < i+2) {
+                    printUsage();
+                }
+                pqcAlg = args[++i];
+
             } else {
                 printUsage();
             }
@@ -221,6 +229,15 @@ public class ClientJSSE {
                 return;
         }
 
+        /* PQC named groups are TLS 1.3 only. Allow only -v 4 (TLS 1.3)
+         * or -v d (generic TLS, which can negotiate TLS 1.3). Reject
+         * everything else up front rather than letting the handshake
+         * fail at the TLS layer. */
+        if (pqcAlg != null && sslVersion != 4 && sslVersion != -1) {
+            System.out.println("-pqc requires -v 4 (TLS 1.3) or -v d");
+            System.exit(1);
+        }
+
         /* Add host into HTTP GET */
         httpGetMsg = String.format("%s\r\nHost: %s\r\n\r\n", httpGetMsg, host);
 
@@ -228,6 +245,15 @@ public class ClientJSSE {
             System.out.println(
                 "Sleeping 10 seconds to allow profiler to attach");
             Thread.sleep(10000);
+        }
+
+        /* Single -pqc group. Set wolfjsse.enabledSupportedCurves before
+         * SSLContext is built so provider sees the restriction when
+         * initializing the session. */
+        if (pqcAlg != null) {
+            Security.setProperty("wolfjsse.enabledSupportedCurves", pqcAlg);
+            System.out.println("Set wolfjsse.enabledSupportedCurves = " +
+                pqcAlg);
         }
 
         /* X509TrustManager that trusts all peer certificates. Used if peer
@@ -468,6 +494,8 @@ public class ClientJSSE {
         System.out.println("-profile\tSleep for 10 sec before/after running " +
                 "to allow profilers to attach");
         System.out.println("-ksformat <str>\tKeyStore format (default: JKS)");
+        System.out.println("-pqc <alg>\tKey Share with specified " +
+                "post-quantum algorithm only, e.g. X25519MLKEM768");
         System.exit(1);
     }
 }

@@ -709,6 +709,7 @@ public class WolfSSLSession {
     private native int rehandshake(long ssl);
     private native int set1SigAlgsList(long ssl, String list);
     private native int useSupportedCurve(long ssl, int name);
+    private native int useKeyShare(long ssl, int group);
     private native int disableExtendedMasterSecret(long ssl);
     private native int hasTicket(long session);
     private native int useClientSuites(long ssl);
@@ -2638,32 +2639,37 @@ public class WolfSSLSession {
     }
 
     /**
-     * Sets the TLS Supported Curves to be used in the ClientHello
-     * extension if enabled in native wolfSSL.
+     * Sets the TLS Supported Curves to be used in the ClientHello extension
+     * if enabled in native wolfSSL. Multiple curves are appended to the
+     * extension via calls into native wolfSSL_UseSupportedCurve(). Iteration
+     * continues across all entries even after one fails. Curves that succeed
+     * are added, curves that fail are not.
      *
-     * @param curveNames String array of ECC curve names to set into the
-     *        Supported Curve extension. String values should match names from
-     *        the following list:
-     *            "sect163k1", "sect163r1", "sect163r2", "sect193r1",
-     *            "sect193r2", "sect233k1", "sect233r1", "sect239k1",
-     *            "sect283k1", "sect283r1", "sect409k1", "sect409r1",
-     *            "sect571k1", "sect571r1", "secp160k1", "secp160r1",
-     *            "secp160r2", "secp192k1", "secp192r1", "secp224k1",
-     *            "secp224r1", "secp256k1", "secp256r1", "secp384r1",
-     *            "secp521r1", "brainpoolP256r1", "brainpoolP384r1",
-     *            "brainpoolP512r1", "x25519", "x448", "sm2P256v1",
-     *            "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144",
-     *            "ffdhe8192"
+     * @param curveNames String array of named-group names to set into the
+     *        Supported Curves extension. String values may be any token
+     *        recognized by {@link WolfSSL#getNamedGroupFromString}, including
+     *        classical curves (e.g. "secp256r1", "x25519", "ffdhe2048") and
+     *        PQC ML-KEM standalone / hybrid groups (e.g. "ML-KEM-768",
+     *        "X25519MLKEM768", "SECP384R1MLKEM1024").
      *
-     * @return <code>WolfSSL.SSL_SUCCESS</code> on success, otherwise
-     *         negative on error.
+     * @return <code>WolfSSL.SSL_SUCCESS</code> when every entry was accepted
+     *         by native wolfSSL. Otherwise the first non-success return value
+     *         encountered while iterating (typically BAD_FUNC_ARG for an
+     *         unknown / unsupported group, or NOT_COMPILED_IN when
+     *         supported_groups support is not compiled into native wolfSSL).
+     *         Note: the call may have partially succeeded. Curves before/after
+     *         the failing entry that were valid are still added to the
+     *         extension.
      * @throws IllegalStateException WolfSSLSession has been freed
      */
     public int useSupportedCurves(String[] curveNames)
         throws IllegalStateException  {
 
-        int ret = 0;
+        int ret = WolfSSL.SSL_SUCCESS;
+        int firstError = WolfSSL.SSL_SUCCESS;
         int curveEnum = 0;
+
+        confirmObjectIsActive();
 
         synchronized (sslLock) {
             WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
@@ -2677,9 +2683,52 @@ public class WolfSSLSession {
             synchronized (sslLock) {
                 ret = useSupportedCurve(this.sslPtr, curveEnum);
             }
+            /* Best-effort: keep adding subsequent curves even if this one
+             * failed. Remember the first failure so the caller can see
+             * something went wrong. Without this aggregation the return value
+             * would silently mask any failure that wasn't the last in list. */
+            if ((ret != WolfSSL.SSL_SUCCESS) &&
+                (firstError == WolfSSL.SSL_SUCCESS)) {
+                firstError = ret;
+            }
         }
 
-        return ret;
+        return firstError;
+    }
+
+    /**
+     * Pre-generate a TLS 1.3 key share for the specified named group and
+     * include it in the ClientHello key_share extension. By default, native
+     * wolfSSL only sends key shares for the highest-priority group(s).
+     * For large PQC key shares (ML-KEM and hybrid groups) this typically
+     * forces a HelloRetryRequest round trip when the server selects a
+     * different group than the client guessed.
+     *
+     * Calling this for a PQC named group ensures the key share is sent up
+     * front, avoiding extra round trip when both peers agree on the PQC group.
+     *
+     * @param group named group constant from {@link WolfSSL}, for
+     *              example {@link WolfSSL#WOLFSSL_X25519MLKEM768}.
+     * @return <code>WolfSSL.SSL_SUCCESS</code> on success.
+     *         <code>WolfSSL.NOT_COMPILED_IN</code> when native wolfSSL was
+     *         built without TLS 1.3. When TLS 1.3 is built but the requested
+     *         named group is not supported by this build (ie: a PQC group on
+     *         a non-PQC build, or X25519MLKEM768 without HAVE_CURVE25519),
+     *         native wolfSSL_UseKeyShare() returns BAD_FUNC_ARG.
+     *         Other negative values on internal error.
+     * @throws IllegalStateException WolfSSLSession has been freed
+     */
+    public int useKeyShare(int group) throws IllegalStateException {
+
+        confirmObjectIsActive();
+
+        synchronized (sslLock) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
+                WolfSSLDebug.INFO, this.sslPtr,
+                () -> "entered useKeyShare(" + group + ")");
+
+            return useKeyShare(this.sslPtr, group);
+        }
     }
 
     /**

@@ -1490,7 +1490,18 @@ JNIEXPORT jstring JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1get_1signatu
             return (*jenv)->NewStringUTF(jenv, "ED25519");
         case CTC_RSASSAPSS:
             return (*jenv)->NewStringUTF(jenv, "RSASSA-PSS");
-
+#ifdef HAVE_ED448
+        case CTC_ED448:
+            return (*jenv)->NewStringUTF(jenv, "ED448");
+#endif
+#ifdef HAVE_DILITHIUM
+        case CTC_ML_DSA_LEVEL2:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-44");
+        case CTC_ML_DSA_LEVEL3:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-65");
+        case CTC_ML_DSA_LEVEL5:
+            return (*jenv)->NewStringUTF(jenv, "ML-DSA-87");
+#endif
         default:
             throwWolfSSLJNIException(jenv, "Unknown signature type");
             return NULL;
