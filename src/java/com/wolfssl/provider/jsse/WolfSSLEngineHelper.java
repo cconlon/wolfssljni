@@ -374,12 +374,31 @@ public class WolfSSLEngineHelper {
                         "Private key is not in PKCS#8 format");
                 }
 
-                /* Skip past PKCS#8 offset */
-                offset = WolfSSL.getPkcs8TraditionalOffset(privKeyEncoded, 0,
-                    privKeyEncoded.length);
+                /* ML-DSA keys have no defined "traditional" (non-PKCS#8) form.
+                 * The algorithm identifier in the PKCS#8 wrapper is what tells
+                 * native wolfSSL which parameter set (44/65/87) to use. Pass
+                 * the full PKCS#8 buffer through to native wolfSSL, which auto
+                 * detects PKCS#8 and dispatches to wc_dilithium_import_private.
+                 * Stripping the wrapper for ML-DSA would lose the algorithm
+                 * identifier and cause native parse to fail. */
+                String alg = privKey.getAlgorithm();
+                boolean isMlDsa = (alg != null) &&
+                    (alg.startsWith("ML-DSA") || alg.startsWith("MLDSA") ||
+                     alg.equals("2.16.840.1.101.3.4.3.17") ||
+                     alg.equals("2.16.840.1.101.3.4.3.18") ||
+                     alg.equals("2.16.840.1.101.3.4.3.19"));
 
-                privKeyTraditional = Arrays.copyOfRange(privKeyEncoded,
-                    offset, privKeyEncoded.length);
+                if (isMlDsa) {
+                    privKeyTraditional = privKeyEncoded;
+                }
+                else {
+                    /* Skip past PKCS#8 offset */
+                    offset = WolfSSL.getPkcs8TraditionalOffset(privKeyEncoded,
+                        0, privKeyEncoded.length);
+
+                    privKeyTraditional = Arrays.copyOfRange(privKeyEncoded,
+                        offset, privKeyEncoded.length);
+                }
 
                 try {
                     ret = this.ssl.usePrivateKeyBuffer(privKeyTraditional,

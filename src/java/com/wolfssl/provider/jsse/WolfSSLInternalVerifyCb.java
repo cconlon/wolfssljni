@@ -439,7 +439,7 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
      * Native wolfSSL verify callback.
      *
      * @param preverify_ok Will be 1 if native wolfSSL verification
-     *        procedured have passed, otherwise 0.
+     *        procedures have passed, otherwise 0.
      * @param x509StorePtr Native pointer to WOLFSSL_X509_STORE structure
      *
      * @return 1 if verification should be considered successful and
@@ -479,8 +479,7 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
         try {
             /* Get WolfSSLCertificate[] from x509StorePtr, certs from
              * store.getCerts() should be listed in order of peer to root */
-            WolfSSLX509StoreCtx store =
-                new WolfSSLX509StoreCtx(x509StorePtr);
+            WolfSSLX509StoreCtx store = new WolfSSLX509StoreCtx(x509StorePtr);
             certs = store.getCerts();
 
         } catch (WolfSSLException e) {
@@ -511,9 +510,12 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
                 x509certs = new X509Certificate[0];
             }
 
-            /* get authType, use first cert */
+            /* get authType, use first cert. Order matters: check "ML-DSA"
+             * before "DSA" since the latter is a substring of the former. */
             String sigType = certs[0].getSignatureType();
-            if (sigType.contains("RSA")) {
+            if (sigType.contains("ML-DSA")) {
+                authType = "ML-DSA";
+            } else if (sigType.contains("RSA")) {
                 authType = "RSA";
             } else if (sigType.contains("ECDSA")) {
                 authType = "ECDSA";

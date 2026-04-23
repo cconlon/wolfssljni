@@ -39,7 +39,11 @@ import org.junit.runners.Suite;
     WolfSSLX509Test.class,
     WolfSSLKeyX509Test.class,
     WolfSSLServiceLoaderTest.class,
-    WolfSSLParametersPskTest.class
+    WolfSSLParametersPskTest.class,
+    WolfSSLPQCKeyExchangeTest.class,
+    WolfSSLPQCAuthenticationTest.class,
+    WolfSSLPQCAuthJksTest.class,
+    WolfSSLCNSA2Test.class
 })
 
 
