@@ -135,6 +135,32 @@ jobs:
       jdk_version: ${{ matrix.jdk_version }}
       wolfssl_configure: ${{ matrix.wolfssl_configure }}
 
+  # --------------- PQC (ML-KEM + ML-DSA) sanity check -----------------
+  # Builds native wolfSSL master with the full PQC option set so that
+  # ML-KEM standalone groups, ML-KEM PQ/T hybrids (incl. X25519MLKEM* and
+  # X448MLKEM768), and ML-DSA cert auth all reach the gated tests instead
+  # of skipping. JDK 24 is required for JEP 497 ML-DSA KeyFactory and
+  # exercises the standard JCE keystore path. JDK 11 also runs to cover
+  # the JDK-8-compatible PEM-based PQC code path. The --enable-all
+  # variant additionally layers wolfSSL's broad feature set on top of
+  # the PQC flags to catch interaction regressions.
+  linux-zulu-pqc:
+    strategy:
+      matrix:
+        os: [ 'ubuntu-latest' ]
+        jdk_version: [ '11', '24' ]
+        wolfssl_configure: [
+            '--enable-jni --enable-mlkem --enable-tls-mlkem-standalone --enable-mldsa --enable-curve25519 --enable-curve448 --enable-ed25519 --enable-ed448',
+            '--enable-jni --enable-all --enable-mlkem --enable-tls-mlkem-standalone --enable-mldsa --enable-curve25519 --enable-curve448 --enable-ed25519 --enable-ed448',
+        ]
+    name: ${{ matrix.os }} (Zulu JDK ${{ matrix.jdk_version }}, PQC full)
+    uses: ./.github/workflows/linux-common.yml
+    with:
+      os: ${{ matrix.os }}
+      jdk_distro: "zulu"
+      jdk_version: ${{ matrix.jdk_version }}
+      wolfssl_configure: ${{ matrix.wolfssl_configure }}
+
   # -------------------- WOLFJNI_USE_IO_SELECT sanity check --------------------
   # Only check one Linux and Mac JDK version as a sanity check.
   # Using Zulu, but this can be expanded if needed.
