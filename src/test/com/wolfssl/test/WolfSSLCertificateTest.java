@@ -32,7 +32,9 @@ import java.util.Date;
 import java.time.Instant;
 import java.time.Duration;
 import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.io.ByteArrayInputStream;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.InvalidKeySpecException;
 import java.security.interfaces.RSAPrivateKey;
@@ -895,6 +897,253 @@ public class WolfSSLCertificateTest {
         subjectName.free();
         issuer.free();
         x509.free();
+    }
+
+    /* Round trip test for setAuthorityKeyId(byte[]) and
+     * setAuthorityKeyIdEx(WolfSSLCertificate).
+     *
+     * RFC 5280 requires the extension OCTET STRING to wrap a SEQUENCE { [0]
+     * keyIdentifier OCTET STRING }. If the encoder writes the raw key-id bytes
+     * directly into the OCTET STRING, the resulting cert is malformed and
+     * strict parsers will reject it.
+     *
+     * This test signs a cert after calling each setter, runs the DER through
+     * java.security.cert.CertificateFactory, pulls the AKID extension via
+     * getExtensionValue("2.5.29.35"), asserts the inner bytes start with
+     * the expected SEQUENCE { [0] keyId }, and that the embedded keyId
+     * matches what was supplied. */
+    @Test
+    public void testWolfSSLCertificateAuthorityKeyIdRoundtrip()
+        throws WolfSSLException, WolfSSLJNIException, IOException,
+               CertificateException {
+
+        Assume.assumeTrue(WolfSSL.FileSystemEnabled());
+
+        /* Raw 20-byte key identifier passed to setAuthorityKeyId(byte[]). */
+        final byte[] akidRaw = new byte[] {
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+            0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23
+        };
+
+        /* SKID stamped on the issuer cert. The AKID derived by
+         * setAuthorityKeyIdEx() must match this value exactly. */
+        final byte[] issuerSkid = new byte[] {
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+            0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43
+        };
+
+        /* setAuthorityKeyId(byte[]) round-trip. buildSignedCertWithAkid()
+         * returns null when the setter is NOT_COMPILED_IN at runtime
+         * (older native wolfSSL). */
+        byte[] derCert = buildSignedCertWithAkid(akidRaw, null);
+        Assume.assumeTrue("AKID setter not compiled in native wolfSSL",
+            derCert != null);
+
+        /* Behavioral probe: if the native encoder did not wrap the raw
+         * keyId in SEQUENCE { [0] keyId } per RFC 5280 4.2.1.1, skip
+         * rather than fail. The encoder bug lives in wolfSSL (see
+         * wolfSSL PR #10370), not wolfssljni. We want the test here to run
+         * for wolfSSL versions that are fixed, but not for broken versions. */
+        Assume.assumeTrue("Native wolfSSL AKID encoder lacks RFC 5280 " +
+            "wrapping fix (wolfSSL PR #10370); upgrade native wolfSSL.",
+            akidExtensionWellFormed(derCert));
+
+        assertAkidExtensionMatches(derCert, akidRaw);
+
+        /* setAuthorityKeyIdEx(WolfSSLCertificate issuer) round-trip. */
+        WolfSSLCertificate issuerCert =
+            new WolfSSLCertificate(caCertPem, WolfSSL.SSL_FILETYPE_PEM);
+        try {
+            try {
+                issuerCert.setSubjectKeyId(issuerSkid);
+            } catch (WolfSSLException e) {
+                if (isNotCompiledIn(e)) {
+                    return;
+                }
+                throw e;
+            }
+
+            byte[] derCertEx = buildSignedCertWithAkid(null, issuerCert);
+            if (derCertEx != null) {
+                assertAkidExtensionMatches(derCertEx, issuerSkid);
+            }
+
+        } finally {
+            issuerCert.free();
+        }
+    }
+
+    /* Behavioral probe: returns true iff the AKID extension on this DER
+     * cert decodes as a well-formed SEQUENCE { [0] keyId } per RFC 5280
+     * 4.2.1.1. Returns false if the extension is missing, malformed, or
+     * the inner content begins with anything other than the SEQUENCE tag
+     * (which is the unfixed-encoder symptom - raw key id bytes written
+     * directly into the OCTET STRING). Used by
+     * testWolfSSLCertificateAuthorityKeyIdRoundtrip to skip on native
+     * wolfSSL builds without the AKID encoder fix.
+     *
+     * X509Certificate.getExtensionValue() returns the DER-encoded extnValue,
+     * an OCTET STRING wrapping the inner extension bytes:
+     *     04 LL <inner-bytes>
+     * For a well-formed AKID, <inner-bytes> starts with 0x30 (SEQUENCE);
+     * for an unfixed encoder it is a raw 20-byte keyId starting with
+     * whatever happens to be byte 0 of the keyId. */
+    private boolean akidExtensionWellFormed(byte[] derCert)
+        throws CertificateException {
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate jdkCert = (X509Certificate)cf.generateCertificate(
+            new ByteArrayInputStream(derCert));
+        if (jdkCert == null) {
+            return false;
+        }
+        byte[] extWrapped = jdkCert.getExtensionValue("2.5.29.35");
+        if (extWrapped == null || extWrapped.length < 4) {
+            return false;
+        }
+        /* Skip outer OCTET STRING wrapper. Short-form length only, since
+         * realistic AKID extensions fit comfortably in <128 bytes. */
+        if ((extWrapped[0] & 0xFF) != 0x04) {
+            return false;
+        }
+        int outerLen = extWrapped[1] & 0xFF;
+        if (outerLen >= 0x80 || extWrapped.length != 2 + outerLen) {
+            return false;
+        }
+        /* Inner must start with SEQUENCE tag (0x30) for a well-formed
+         * AuthorityKeyIdentifier. */
+        return (extWrapped[2] & 0xFF) == 0x30;
+    }
+
+    /* Build, populate, AKID-stamp, and sign a cert. Returns the DER bytes,
+     * or null if the AKID setter returned NOT_COMPILED_IN at runtime (older
+     * native wolfSSL). Exactly one of {akidRaw, issuerForEx} must be non-null
+     * to select which AKID setter to exercise. */
+    private byte[] buildSignedCertWithAkid(byte[] akidRaw,
+        WolfSSLCertificate issuerForEx) throws WolfSSLException,
+        WolfSSLJNIException, IOException {
+
+        WolfSSLCertificate x509 = new WolfSSLCertificate();
+        WolfSSLX509Name subjectName = null;
+        WolfSSLCertificate issuer = null;
+
+        try {
+            Instant now = Instant.now();
+            x509.setNotBefore(Date.from(now));
+            x509.setNotAfter(Date.from(now.plus(Duration.ofDays(365))));
+            x509.setSerialNumber(BigInteger.valueOf(0xCAFE));
+
+            subjectName = GenerateTestSubjectName();
+            x509.setSubjectName(subjectName);
+
+            if (akidRaw != null) {
+                issuer = new WolfSSLCertificate(caCertPem,
+                    WolfSSL.SSL_FILETYPE_PEM);
+                x509.setIssuerName(issuer);
+            }
+            else {
+                x509.setIssuerName(issuerForEx);
+            }
+
+            x509.setPublicKey(cliKeyPubDer, WolfSSL.RSAk,
+                WolfSSL.SSL_FILETYPE_ASN1);
+
+            try {
+                if (akidRaw != null) {
+                    x509.setAuthorityKeyId(akidRaw);
+                }
+                else {
+                    x509.setAuthorityKeyIdEx(issuerForEx);
+                }
+
+            } catch (WolfSSLException e) {
+                if (isNotCompiledIn(e)) {
+                    return null;
+                }
+                throw e;
+            }
+
+            x509.signCert(caKeyDer, WolfSSL.RSAk,
+                WolfSSL.SSL_FILETYPE_ASN1, "SHA256");
+
+            byte[] der = x509.getDer();
+            assertNotNull("getDer() returned null after signing", der);
+            assertTrue("getDer() returned empty bytes", der.length > 0);
+
+            return der;
+
+        } finally {
+            if (subjectName != null) {
+                subjectName.free();
+            }
+            if (issuer != null) {
+                issuer.free();
+            }
+            x509.free();
+        }
+    }
+
+    /* Parse DER cert with JDK CertificateFactory and assert the AKID
+     * extension (OID 2.5.29.35) decodes as a well-formed SEQUENCE {
+     * [0] keyIdentifier OCTET STRING } whose keyId matches expectedKeyId. */
+    private void assertAkidExtensionMatches(byte[] derCert,
+        byte[] expectedKeyId) throws CertificateException {
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate jdkCert = (X509Certificate)cf.generateCertificate(
+            new ByteArrayInputStream(derCert));
+        assertNotNull("CertificateFactory rejected the DER cert " +
+            "(likely malformed AKID extension)", jdkCert);
+
+        /* getExtensionValue() returns the DER-encoded extnValue, which per
+         * X.509 is an OCTET STRING whose contents are the actual extension
+         * value. So the bytes look like:
+         *     04 LL <inner-bytes>
+         * For AKID, <inner-bytes> must be the AuthorityKeyIdentifier
+         * SEQUENCE per RFC 5280:
+         *     30 LL 80 KL <keyId>
+         */
+        byte[] extWrapped = jdkCert.getExtensionValue("2.5.29.35");
+        assertNotNull("AKID extension (2.5.29.35) was not present in cert",
+            extWrapped);
+
+        /* Strip the outer OCTET STRING wrapper. */
+        assertTrue("AKID extension envelope too short: " + extWrapped.length,
+            extWrapped.length >= 2);
+        assertEquals("AKID extension envelope is not OCTET STRING",
+            0x04, extWrapped[0] & 0xFF);
+        int outerLen = extWrapped[1] & 0xFF;
+        /* Short-form length only; AKID for 20-byte keyId fits in <128. */
+        assertTrue("Unexpected long-form length in AKID envelope",
+            outerLen < 0x80);
+        assertEquals("AKID envelope length mismatch",
+            extWrapped.length - 2, outerLen);
+
+        /* Inner extension structure for a 20-byte keyId is exactly 24 bytes:
+         *   SEQUENCE (0x30) length 22 (0x16)
+         *     [0] (0x80) length 20 (0x14)
+         *       <20 keyId bytes>
+         */
+        byte[] inner = new byte[outerLen];
+        System.arraycopy(extWrapped, 2, inner, 0, outerLen);
+        assertEquals("AKID inner length (expected SEQUENCE { [0] keyId } " +
+            "wrapping " + expectedKeyId.length + " bytes = " +
+            (expectedKeyId.length + 4) + " total)",
+            expectedKeyId.length + 4, inner.length);
+        assertEquals("AKID inner not a SEQUENCE — encoder likely wrote " +
+            "raw keyId bytes directly into the extension OCTET STRING",
+            0x30, inner[0] & 0xFF);
+        assertEquals("AKID SEQUENCE length byte unexpected",
+            expectedKeyId.length + 2, inner[1] & 0xFF);
+        assertEquals("AKID keyIdentifier tag is not [0] context-specific",
+            0x80, inner[2] & 0xFF);
+        assertEquals("AKID keyIdentifier length byte unexpected",
+            expectedKeyId.length, inner[3] & 0xFF);
+
+        byte[] decodedKeyId = new byte[expectedKeyId.length];
+        System.arraycopy(inner, 4, decodedKeyId, 0, expectedKeyId.length);
+        assertArrayEquals("AKID keyIdentifier bytes do not match input",
+            expectedKeyId, decodedKeyId);
     }
 
     /* Quick sanity check on certificate bytes. Loads cert into new

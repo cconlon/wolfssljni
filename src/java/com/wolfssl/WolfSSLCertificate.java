@@ -815,7 +815,15 @@ public class WolfSSLCertificate implements Serializable {
      * Sets the Authority Key Identifier extension for this WolfSSLCertificate,
      * used when generating X509v3 certificates.
      *
-     * @param akid Byte array containing Authority Key Identifier.
+     * The argument is the raw key identifier value (ex: the SHA-1 hash of the
+     * issuer public key, or the issuer SubjectKeyIdentifier value). The bytes
+     * must not be a pre-encoded AuthorityKeyIdentifier SEQUENCE. On native
+     * wolfSSL with the AKID encoder fix (wolfSSL PR #10370), the bytes are
+     * wrapped in SEQUENCE { [0] keyIdentifier } per RFC 5280 4.2.1.1.
+     * Older native wolfSSL builds without the fix emit a malformed AKID
+     * extension that parsers reject.
+     *
+     * @param akid Raw key identifier bytes.
      *
      * @throws IllegalStateException if WolfSSLCertificate has been freed.
      * @throws WolfSSLException if invalid arguments or native JNI error occurs.
@@ -850,6 +858,10 @@ public class WolfSSLCertificate implements Serializable {
     /**
      * Sets the Authority Key Identifier extension for this WolfSSLCertificate
      * using the issuer certificate.
+     *
+     * The keyIdentifier value used is the issuer SubjectKeyIdentifier
+     * extension contents if present, otherwise the SHA-1 hash of the issuer
+     * SubjectPublicKeyInfo.
      *
      * @param issuer Issuer certificate used to derive the Authority Key ID.
      *
