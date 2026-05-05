@@ -37,6 +37,7 @@ import com.wolfssl.WolfSSLException;
     WolfCryptECCTest.class,
     WolfSSLCertificateTest.class,
     WolfSSLCertRequestTest.class,
+    WolfSSLX509NameTest.class,
     WolfSSLCertManagerTest.class,
     WolfSSLNameConstraintsTest.class,
     WolfSSLCRLTest.class
