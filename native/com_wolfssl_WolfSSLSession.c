@@ -73,7 +73,9 @@ int NativeSessionTicketCb(WOLFSSL *ssl, const unsigned char* ticket,
 #endif
 
 #ifdef HAVE_CRL
-/* global object refs for CRL callback */
+/* Process-global jobject for the missing-CRL callback registered via
+ * Java_com_wolfssl_WolfSSLSession_setCRLCb(). wolfSSL CbMissingCRL has no
+ * SSL/CTX pointer, so native wolfSSL cannot route per-instance. */
 static jobject g_crlCbIfaceObj;
 #endif
 
@@ -1756,6 +1758,30 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_accept
     return ret;
 }
 
+/* Release process-global session-level missing-CRL callback ref. Called
+ * from JNI_OnUnload() in com_wolfssl_WolfSSL.c so the global is torn
+ * down at native library unload. */
+void NativeWolfSSLSessionCleanup(JNIEnv* jenv)
+{
+#ifdef HAVE_CRL
+    jobject prior = NULL;
+#endif
+
+    if (jenv == NULL) {
+        return;
+    }
+#ifdef HAVE_CRL
+    (void)NativeCrlCbLock();
+    prior = g_crlCbIfaceObj;
+    g_crlCbIfaceObj = NULL;
+    (void)NativeCrlCbUnlock();
+
+    if (prior != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, prior);
+    }
+#endif
+}
+
 JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_freeSSL
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
@@ -1856,14 +1882,6 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_freeSSL
             "Error reseting internal wolfSSL JNI pointer to NULL, freeSSL");
         return;
     }
-
-#ifdef HAVE_CRL
-    /* release global CRL callback ref if registered */
-    if (g_crlCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_crlCbIfaceObj);
-        g_crlCbIfaceObj = NULL;
-    }
-#endif
 
 #if defined(HAVE_PK_CALLBACKS)
     #ifdef HAVE_ECC
@@ -3919,6 +3937,8 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_setCRLCb
 {
 #ifdef HAVE_CRL
     int    ret = 0;
+    jobject newRef = NULL;
+    jobject prior = NULL;
     WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
     (void)jcl;
 
@@ -3932,22 +3952,35 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_setCRLCb
         return SSL_FAILURE;
     }
 
-    /* release global CRL callback ref if already registered */
-    if (g_crlCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_crlCbIfaceObj);
-        g_crlCbIfaceObj = NULL;
-    }
-
+    /* Allocate the new global ref outside the lock to avoid holding
+     * g_crlCbMutex across the JNI allocation. */
     if (cb != NULL) {
-        /* store Java CRL callback Interface object */
-        g_crlCbIfaceObj = (*jenv)->NewGlobalRef(jenv, cb);
-        if (g_crlCbIfaceObj == NULL) {
+        newRef = (*jenv)->NewGlobalRef(jenv, cb);
+        if (newRef == NULL) {
             throwWolfSSLException(jenv,
                 "Error storing global missingCRLCallback interface");
             return SSL_FAILURE;
         }
+    }
 
+    /* Swap global pointer under g_crlCbMutex. The prior ref is deleted
+     * after the unlock so any in-flight NativeMissingCRLCallback that already
+     * promoted the global to a local ref can complete safely. */
+    (void)NativeCrlCbLock();
+    prior = g_crlCbIfaceObj;
+    g_crlCbIfaceObj = newRef;
+    (void)NativeCrlCbUnlock();
+
+    if (prior != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, prior);
+    }
+
+    if (cb != NULL) {
         ret = wolfSSL_SetCRL_Cb(ssl, NativeMissingCRLCallback);
+    }
+    else {
+        /* Unregister native wolfSSL CRL callback */
+        ret = wolfSSL_SetCRL_Cb(ssl, NULL);
     }
 
     return ret;
@@ -3971,6 +4004,7 @@ void NativeMissingCRLCallback(const char* url)
     jmethodID crlMethod = NULL;
     jobjectRefType refcheck;
     jstring missingUrl = NULL;
+    jobject   crlCbObj = NULL;
 
     /* get JNIEnv from JavaVM */
     vmret = (int)((*g_vm)->GetEnv(g_vm, (void**) &jenv, JNI_VERSION_1_6));
@@ -3990,12 +4024,29 @@ void NativeMissingCRLCallback(const char* url)
         return;
     }
 
-    /* check if our stored object reference is valid */
-    refcheck = (*jenv)->GetObjectRefType(jenv, g_crlCbIfaceObj);
-    if (refcheck == 2) {
+    /* Promote the global jobject to a local ref under g_crlCbMutex so we keep
+     * the object alive even if a concurrent setCRLCb clears the global and
+     * deletes the previous ref immediately after we unlock. */
+    (void)NativeCrlCbLock();
+    if (g_crlCbIfaceObj != NULL) {
+        crlCbObj = (*jenv)->NewLocalRef(jenv, g_crlCbIfaceObj);
+    }
+    (void)NativeCrlCbUnlock();
 
-        /* lookup WolfSSLMissingCRLCallback class from global object ref */
-        crlClass = (*jenv)->GetObjectClass(jenv, g_crlCbIfaceObj);
+    if (crlCbObj == NULL) {
+        /* No Java callback registered, drop silently. */
+        if (needsDetach) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+        return;
+    }
+
+    /* GetObjectRefType returns non-zero for local/global/weak refs. */
+    refcheck = (*jenv)->GetObjectRefType(jenv, crlCbObj);
+    if (refcheck != 0) {
+
+        /* lookup WolfSSLMissingCRLCallback class from local object ref */
+        crlClass = (*jenv)->GetObjectClass(jenv, crlCbObj);
         if (!crlClass) {
             throwWolfSSLException(jenv,
                 "Can't get native WolfSSLMissingCRLCallback class reference");
@@ -4023,7 +4074,7 @@ void NativeMissingCRLCallback(const char* url)
         /* create jstring from char* */
         missingUrl = (*jenv)->NewStringUTF(jenv, url);
 
-        (*jenv)->CallVoidMethod(jenv, g_crlCbIfaceObj, crlMethod, missingUrl);
+        (*jenv)->CallVoidMethod(jenv, crlCbObj, crlMethod, missingUrl);
 
         if ((*jenv)->ExceptionOccurred(jenv)) {
             (*jenv)->ExceptionDescribe(jenv);

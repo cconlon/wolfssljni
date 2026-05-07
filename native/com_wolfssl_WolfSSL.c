@@ -71,6 +71,10 @@ jmethodID g_bufferArrayOffsetMethodId = NULL;
 jmethodID g_bufferSetPositionMethodId = NULL;
 jmethodID g_verifyCallbackMethodId = NULL;
 
+/* WOLFSSL_CTX ex_data slot for per-context verify callback jobject.
+ * -1 means not allocated. Populated in Java_com_wolfssl_WolfSSL_init(). */
+int g_verifyCbCtxExDataIdx = -1;
+
 #ifdef HAVE_FIPS
 /* global object ref for FIPS error callback */
 static jobject g_fipsCbIfaceObj;
@@ -215,6 +219,19 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved)
     (*env)->DeleteLocalRef(env, byteBufferClass);
     (*env)->DeleteLocalRef(env, verifyClass);
 
+    /* Initialize the mutex serializing verify callback jobject reads/updates.
+     * Done here to guarantee race-free init. */
+    if (NativeVerifyCbMutexInit() != 0) {
+        return JNI_ERR;
+    }
+
+    /* Initialize the mutex serializing missing-CRL callback jobject
+     * reads/updates. */
+    if (NativeCrlCbMutexInit() != 0) {
+        NativeVerifyCbMutexFree();
+        return JNI_ERR;
+    }
+
     return JNI_VERSION_1_6;
 }
 
@@ -229,6 +246,16 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved)
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {
         return;
     }
+
+    /* Release process global jobject refs at CTX and session levels. */
+    NativeWolfSSLContextCleanup(env);
+    NativeWolfSSLSessionCleanup(env);
+
+    /* Free the verify callback synchronization mutex. */
+    NativeVerifyCbMutexFree();
+
+    /* Free the missing-CRL callback synchronization mutex. */
+    NativeCrlCbMutexFree();
 
     /* Clear cached method ID */
     g_sslIORecvMethodId = NULL;
@@ -431,7 +458,16 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSL_init
 #endif /* HAVE_FIPS && HAVE_FIPS_VERSION == 5 */
 
     if (ret == 0) {
-        return (jint)wolfSSL_Init();
+        ret = (int)wolfSSL_Init();
+        if (ret == WOLFSSL_SUCCESS) {
+            /* Allocate the per-context verify callback ex_data slot if not
+             * allocated yet. Guarded by g_verifyCbMutex (initialized in
+             * JNI_OnLoad()). */
+            if (NativeVerifyCbSlotEnsure() != 0) {
+                ret = WOLFSSL_FAILURE;
+            }
+        }
+        return (jint)ret;
     } else {
         return (jint)WOLFSSL_FAILURE;
     }
