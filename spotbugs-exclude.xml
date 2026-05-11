@@ -269,6 +269,38 @@
         <Field name="x509NamePtr"/>
         <Bug pattern="IS2_INCONSISTENT_SYNC"/>
     </Match>
+    <Match>
+        <Class name="com.wolfssl.WolfSSLX509Name"/>
+        <Field name="active"/>
+        <Bug pattern="IS2_INCONSISTENT_SYNC"/>
+    </Match>
+    <!--
+        IS2_INCONSISTENT_SYNC: WolfSSLX509Name cached mirror fields.
+        Written by updateMirrorField() during DN-based construction
+        (before the object is published) and from synchronized
+        setXxx() methods after construction. Reads via synchronized
+        getXxx() methods. Safe under JMM publication semantics.
+    -->
+    <Match>
+        <Class name="com.wolfssl.WolfSSLX509Name"/>
+        <Or>
+            <Field name="countryName"/>
+            <Field name="stateOrProvinceName"/>
+            <Field name="streetAddress"/>
+            <Field name="localityName"/>
+            <Field name="surname"/>
+            <Field name="commonName"/>
+            <Field name="emailAddress"/>
+            <Field name="organizationName"/>
+            <Field name="organizationalUnitName"/>
+            <Field name="postalCode"/>
+            <Field name="userId"/>
+            <Field name="title"/>
+            <Field name="domainComponent"/>
+            <Field name="serialNumber"/>
+        </Or>
+        <Bug pattern="IS2_INCONSISTENT_SYNC"/>
+    </Match>
 
     <!--
         IS2_INCONSISTENT_SYNC: WolfSSLSession callback context
