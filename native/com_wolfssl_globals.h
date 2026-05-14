@@ -46,6 +46,12 @@ extern jmethodID g_bufferArrayOffsetMethodId;     /* ByteBuffer.arrayOffset() */
 extern jmethodID g_bufferSetPositionMethodId;      /* ByteBuffer.position(int) */
 extern jmethodID g_verifyCallbackMethodId;         /* WolfSSLVerifyCallback.verifyCallback */
 
+/* WOLFSSL_CTX ex_data index used to store the per-WolfSSLContext jobject ref
+ * to the user WolfSSLVerifyCallback. Allocated once in
+ * Java_com_wolfssl_WolfSSL_init via wolfSSL_CTX_get_ex_new_index(). A
+ * negative value means the slot has not yet been allocated. */
+extern int g_verifyCbCtxExDataIdx;
+
 /* struct to hold I/O class, object refs */
 typedef struct {
     int active;
@@ -60,5 +66,28 @@ unsigned int NativePskServerCb(WOLFSSL* ssl, const char* identity,
 /* Helper functions to throw exceptions */
 void throwWolfSSLJNIException(JNIEnv* jenv, const char* msg);
 void throwWolfSSLException(JNIEnv* jenv, const char* msg);
+
+/* Release process-global jobject refs. Called from JNI_OnUnload() */
+void NativeWolfSSLContextCleanup(JNIEnv* jenv);
+void NativeWolfSSLSessionCleanup(JNIEnv* jenv);
+
+/* Initialize/free the process-global mutex around verify callback */
+int  NativeVerifyCbMutexInit(void);
+void NativeVerifyCbMutexFree(void);
+
+/* Lock/unlock the verify callback mutex. Logs on failure. */
+int NativeVerifyCbLock(void);
+int NativeVerifyCbUnlock(void);
+
+/* Ensure verify callback slot is allocated */
+int NativeVerifyCbSlotEnsure(void);
+
+/* Initialize/free the process-global mutex around missing-CRL callback */
+int NativeCrlCbMutexInit(void);
+void NativeCrlCbMutexFree(void);
+
+/* Lock/unlock the missing-CRL callback mutex. */
+int NativeCrlCbLock(void);
+int NativeCrlCbUnlock(void);
 
 #endif

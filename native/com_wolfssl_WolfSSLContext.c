@@ -35,12 +35,166 @@
 #include "com_wolfssl_globals.h"
 #include "com_wolfssl_WolfSSLContext.h"
 
-/* global object refs for verify, CRL callbacks */
-static jobject g_verifyCbIfaceObj;
+/* Process-global mutex serializing reads/updates of the per-WOLFSSL_CTX
+ * verify callback jobject (stored in WOLFSSL_CTX ex_data at
+ * g_verifyCbCtxExDataIdx).
+ *
+ * setVerify and freeContext take the mutex while updating ex_data, then
+ * release it before calling DeleteGlobalRef on the prior ref. Any thread
+ * already inside NativeVerifyCallback's local-ref window completes safely.
+ *
+ * Initialized in Java_com_wolfssl_WolfSSL_init, freed in JNI_OnUnload. */
+static wolfSSL_Mutex g_verifyCbMutex;
+static int g_verifyCbMutexInit = 0;
 
+int NativeVerifyCbMutexInit(void)
+{
+    if (g_verifyCbMutexInit) {
+        return 0;
+    }
+    if (wc_InitMutex(&g_verifyCbMutex) != 0) {
+        return -1;
+    }
+    g_verifyCbMutexInit = 1;
+
+    return 0;
+}
+
+void NativeVerifyCbMutexFree(void)
+{
+    if (g_verifyCbMutexInit) {
+        wc_FreeMutex(&g_verifyCbMutex);
+        g_verifyCbMutexInit = 0;
+    }
+}
+
+int NativeVerifyCbLock(void)
+{
+    int rc;
+
+    if (!g_verifyCbMutexInit) {
+        return 0;
+    }
+
+    rc = wc_LockMutex(&g_verifyCbMutex);
+    if (rc != 0) {
+        WOLFSSL_MSG("Failed to lock verify callback mutex");
+    }
+    return rc;
+}
+
+int NativeVerifyCbUnlock(void)
+{
+    int rc;
+
+    if (!g_verifyCbMutexInit) {
+        return 0;
+    }
+
+    rc = wc_UnLockMutex(&g_verifyCbMutex);
+    if (rc != 0) {
+        WOLFSSL_MSG("Failed to unlock verify callback mutex");
+    }
+    return rc;
+}
+
+int NativeVerifyCbSlotEnsure(void)
+{
+    int idx;
+    int rc = 0;
+
+    /* Mutex should have been initialized in JNI_OnLoad() */
+    if (!g_verifyCbMutexInit) {
+        WOLFSSL_MSG("Verify callback mutex not initialized");
+        return -1;
+    }
+
+    if (NativeVerifyCbLock() != 0) {
+        return -1;
+    }
+
+    if (g_verifyCbCtxExDataIdx < 0) {
+        idx = wolfSSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+        if (idx < 0) {
+            WOLFSSL_MSG("Failed to allocate verify callback ex_data index");
+            rc = -1;
+        }
+        else {
+            g_verifyCbCtxExDataIdx = idx;
+        }
+    }
+
+    (void)NativeVerifyCbUnlock();
+
+    return rc;
+}
+
+/* The CTX-level missing-CRL callback below is process-global. wolfSSL
+ * CbMissingCRL signature has no SSL/CTX pointer, so native wolfSSL cannot
+ * route per instance. Access is serialized by g_crlCbMutex (shared with the
+ * session-level g_crlCbIfaceObj in com_wolfssl_WolfSSLSession.c). */
 #ifdef HAVE_CRL
 static jobject g_crlCtxCbIfaceObj;
 #endif
+
+/* Process-global mutex covering both CTX-level and session-level missing CRL
+ * callback jobjects. Initialized in Java_com_wolfssl_WolfSSL_init, freed in
+ * JNI_OnUnload. */
+static wolfSSL_Mutex g_crlCbMutex;
+static int g_crlCbMutexInit = 0;
+
+int NativeCrlCbMutexInit(void)
+{
+    if (g_crlCbMutexInit) {
+        return 0;
+    }
+
+    if (wc_InitMutex(&g_crlCbMutex) != 0) {
+        return -1;
+    }
+
+    g_crlCbMutexInit = 1;
+
+    return 0;
+}
+
+void NativeCrlCbMutexFree(void)
+{
+    if (g_crlCbMutexInit) {
+        wc_FreeMutex(&g_crlCbMutex);
+        g_crlCbMutexInit = 0;
+    }
+}
+
+int NativeCrlCbLock(void)
+{
+    int rc;
+
+    if (!g_crlCbMutexInit) {
+        return 0;
+    }
+
+    rc = wc_LockMutex(&g_crlCbMutex);
+    if (rc != 0) {
+        WOLFSSL_MSG("Failed to lock missing-CRL callback mutex");
+    }
+    return rc;
+}
+
+int NativeCrlCbUnlock(void)
+{
+    int rc;
+
+    if (!g_crlCbMutexInit) {
+        return 0;
+    }
+
+    rc = wc_UnLockMutex(&g_crlCbMutex);
+    if (rc != 0) {
+        WOLFSSL_MSG("Failed to unlock missing-CRL callback mutex");
+    }
+    return rc;
+}
 
 /* custom I/O native fn prototypes */
 int  NativeIORecvCb(WOLFSSL *ssl, char *buf, int sz, void *ctx);
@@ -498,26 +652,48 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLContext_useCertificateChainFile
 #endif
 }
 
+/* Release process-global CRL ctx callback ref. Called from JNI_OnUnload() */
+void NativeWolfSSLContextCleanup(JNIEnv* jenv)
+{
+#ifdef HAVE_CRL
+    jobject prior = NULL;
+#endif
+
+    if (jenv == NULL) {
+        return;
+    }
+#ifdef HAVE_CRL
+    (void)NativeCrlCbLock();
+    prior = g_crlCtxCbIfaceObj;
+    g_crlCtxCbIfaceObj = NULL;
+    (void)NativeCrlCbUnlock();
+
+    if (prior != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, prior);
+    }
+#endif
+}
+
 JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLContext_freeContext
   (JNIEnv* jenv, jobject jcl, jlong ctxPtr)
 {
     WOLFSSL_CTX* ctx = (WOLFSSL_CTX*)(uintptr_t)ctxPtr;
-    (void)jenv;
+    jobject verifyCb = NULL;
     (void)jcl;
 
-    /* release verify callback object if set */
-    if (g_verifyCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_verifyCbIfaceObj);
-        g_verifyCbIfaceObj = NULL;
+    /* Capture and clear the per-CTX verify callback jobject under lock. */
+    if (ctx != NULL && jenv != NULL && g_verifyCbCtxExDataIdx >= 0) {
+        (void)NativeVerifyCbLock();
+        verifyCb = (jobject)wolfSSL_CTX_get_ex_data(ctx,
+            g_verifyCbCtxExDataIdx);
+        if (verifyCb != NULL) {
+            (void)wolfSSL_CTX_set_ex_data(ctx, g_verifyCbCtxExDataIdx, NULL);
+        }
+        (void)NativeVerifyCbUnlock();
+        if (verifyCb != NULL) {
+            (*jenv)->DeleteGlobalRef(jenv, verifyCb);
+        }
     }
-
-#ifdef HAVE_CRL
-    /* release global CRL callback object if set */
-    if (g_crlCtxCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_crlCtxCbIfaceObj);
-        g_crlCtxCbIfaceObj = NULL;
-    }
-#endif /* HAVE_CRL */
 
     /* wolfSSL checks for null pointer */
     wolfSSL_CTX_free(ctx);
@@ -527,30 +703,62 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLContext_setVerify(JNIEnv* jenv,
     jobject jcl, jlong ctxPtr, jint mode, jobject callbackIface)
 {
     WOLFSSL_CTX* ctx = (WOLFSSL_CTX*)(uintptr_t)ctxPtr;
+    jobject prior = NULL;
+    jobject newRef = NULL;
     (void)jcl;
 
-    if (jenv == NULL) {
+    if (jenv == NULL || ctx == NULL) {
         return;
     }
 
-    /* release verify callback object if set before */
-    if (g_verifyCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_verifyCbIfaceObj);
-        g_verifyCbIfaceObj = NULL;
+    if (g_verifyCbCtxExDataIdx < 0) {
+        /* ex_data slot was not allocated at init, cannot store per-CTX cb */
+        throwWolfSSLJNIException(jenv,
+            "Verify callback ex_data slot not allocated");
+        return;
     }
+
+    if (callbackIface != NULL) {
+        newRef = (*jenv)->NewGlobalRef(jenv, callbackIface);
+        if (newRef == NULL) {
+            throwWolfSSLJNIException(jenv,
+                "Error storing verify callback global reference");
+            return;
+        }
+    }
+
+    (void)NativeVerifyCbLock();
+
+    /* Capture the prior per-CTX verify callback object */
+    prior = (jobject)wolfSSL_CTX_get_ex_data(ctx, g_verifyCbCtxExDataIdx);
 
     if (!callbackIface) {
+        /* Unregister the native verify callback first so wolfSSL stops
+         * routing handshakes through it, then clear the slot. */
         wolfSSL_CTX_set_verify(ctx, mode, NULL);
+        (void)wolfSSL_CTX_set_ex_data(ctx, g_verifyCbCtxExDataIdx, NULL);
     }
     else {
-        /* store Java verify Interface object */
-        g_verifyCbIfaceObj = (*jenv)->NewGlobalRef(jenv, callbackIface);
-        if (g_verifyCbIfaceObj == NULL) {
-            printf("error storing global callback interface\n");
+        if (wolfSSL_CTX_set_ex_data(ctx, g_verifyCbCtxExDataIdx, newRef)
+                != WOLFSSL_SUCCESS) {
+            (void)NativeVerifyCbUnlock();
+            /* prior (if any) is still stored in ctx ex_data because the
+             * set_ex_data call failed. Leave it there for the next setter
+             * or freeContext() to release. */
+            (*jenv)->DeleteGlobalRef(jenv, newRef);
+            throwWolfSSLJNIException(jenv,
+                "Error storing verify callback in ctx ex_data");
+            return;
         }
-
-        /* set verify mode, register Java callback with wolfSSL */
+        /* Ensure the native verify callback is registered. */
         wolfSSL_CTX_set_verify(ctx, mode, NativeVerifyCallback);
+    }
+
+    (void)NativeVerifyCbUnlock();
+
+    /* Release the prior global ref outside the lock */
+    if (prior != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, prior);
     }
 }
 
@@ -564,6 +772,9 @@ int NativeVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
     jclass    verifyClass = NULL;
     jmethodID verifyMethod = NULL;
     jobjectRefType refcheck;
+    WOLFSSL*     ssl = NULL;
+    WOLFSSL_CTX* ctx = NULL;
+    jobject      verifyCbObj = NULL;
 
     if (!g_vm) {
         /* we can't throw an exception yet, so just return 0 (failure) */
@@ -596,12 +807,43 @@ int NativeVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
         return -103;
     }
 
-    /* check if our stored object reference is valid */
-    refcheck = (*jenv)->GetObjectRefType(jenv, g_verifyCbIfaceObj);
-    if (refcheck == 2) {
+    /* Locate the per-context verify callback jobject via
+     * store->ssl->ctx->ex_data. The jobject is owned by the WOLFSSL_CTX
+     * that produced this handshake, so each context fires its own user
+     * callback. If the slot is empty or any lookup step fails, fall
+     * through to verifyCbObj == NULL below and fail closed. */
+    if (g_verifyCbCtxExDataIdx >= 0 && store != NULL) {
+        ssl = (WOLFSSL*)wolfSSL_X509_STORE_CTX_get_ex_data(store,
+            wolfSSL_get_ex_data_X509_STORE_CTX_idx());
+        if (ssl != NULL) {
+            ctx = wolfSSL_get_SSL_CTX(ssl);
+        }
+    }
+    if (ctx != NULL) {
+        (void)NativeVerifyCbLock();
+        verifyCbObj = (jobject)wolfSSL_CTX_get_ex_data(ctx,
+            g_verifyCbCtxExDataIdx);
+        if (verifyCbObj != NULL) {
+            verifyCbObj = (*jenv)->NewLocalRef(jenv, verifyCbObj);
+        }
+        (void)NativeVerifyCbUnlock();
+    }
+    if (verifyCbObj == NULL) {
+        /* No Java callback registered. Fail closed without throwing. */
+        if (needsDetach) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+        return 0;
+    }
+
+    /* check if our stored object reference is valid (non-zero ref type
+     * covers local, global, or weak global; verifyCbObj is a local ref
+     * promoted from the per-CTX global ref under g_verifyCbMutex) */
+    refcheck = (*jenv)->GetObjectRefType(jenv, verifyCbObj);
+    if (refcheck != 0) {
 
         /* lookup WolfSSLVerifyCallback class from global object ref */
-        verifyClass = (*jenv)->GetObjectClass(jenv, g_verifyCbIfaceObj);
+        verifyClass = (*jenv)->GetObjectClass(jenv, verifyCbObj);
         if (!verifyClass) {
             if ((*jenv)->ExceptionOccurred(jenv)) {
                 (*jenv)->ExceptionDescribe(jenv);
@@ -630,7 +872,7 @@ int NativeVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
             return -105;
         }
 
-        retval = (*jenv)->CallIntMethod(jenv, g_verifyCbIfaceObj,
+        retval = (*jenv)->CallIntMethod(jenv, verifyCbObj,
                 verifyMethod, preverify_ok, (jlong)(uintptr_t)store);
 
         if ((*jenv)->ExceptionOccurred(jenv)) {
@@ -1767,7 +2009,8 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLContext_setCRLCb
 {
 #ifdef HAVE_CRL
     int ret = 0;
-    jclass excClass;
+    jobject newRef = NULL;
+    jobject prior = NULL;
     WOLFSSL_CTX* ctx = (WOLFSSL_CTX*)(uintptr_t)ctxPtr;
     (void)jcl;
 
@@ -1775,28 +2018,35 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLContext_setCRLCb
         return (jint)BAD_FUNC_ARG;
     }
 
-    /* release global CRL callback object if set */
-    if (g_crlCtxCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_crlCtxCbIfaceObj);
-        g_crlCtxCbIfaceObj = NULL;
-    }
-
     if (cb != NULL) {
-        /* store Java CRL callback Interface object */
-        g_crlCtxCbIfaceObj = (*jenv)->NewGlobalRef(jenv, cb);
-
-        if (!g_crlCtxCbIfaceObj) {
-            excClass = (*jenv)->FindClass(jenv,
-                                    "com/wolfssl/WolfSSLJNIException");
+        newRef = (*jenv)->NewGlobalRef(jenv, cb);
+        if (newRef == NULL) {
             if ((*jenv)->ExceptionOccurred(jenv)) {
                 (*jenv)->ExceptionDescribe(jenv);
                 (*jenv)->ExceptionClear(jenv);
             }
-            (*jenv)->ThrowNew(jenv, excClass,
-                    "error storing global missing CTX CRL callback interface");
+            throwWolfSSLJNIException(jenv,
+                "error storing global missing CTX CRL callback interface");
+            return (jint)SSL_FAILURE;
         }
+    }
 
+    /* Swap the global pointer under g_crlCbMutex */
+    (void)NativeCrlCbLock();
+    prior = g_crlCtxCbIfaceObj;
+    g_crlCtxCbIfaceObj = newRef;
+    (void)NativeCrlCbUnlock();
+
+    if (prior != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, prior);
+    }
+
+    if (cb != NULL) {
         ret = wolfSSL_CTX_SetCRL_Cb(ctx, NativeCtxMissingCRLCallback);
+    }
+    else {
+        /* Unregister native wolfSSL CRL callback */
+        ret = wolfSSL_CTX_SetCRL_Cb(ctx, NULL);
     }
 
     return (jint)ret;
@@ -1821,6 +2071,7 @@ void NativeCtxMissingCRLCallback(const char* url)
     jmethodID crlMethod;
     jstring missingUrl = NULL;
     jobjectRefType refcheck;
+    jobject   crlCbObj = NULL;
 
     /* get JNIEnv from JavaVM */
     vmret = (int)((*g_vm)->GetEnv(g_vm, (void**) &jenv, JNI_VERSION_1_6));
@@ -1850,12 +2101,31 @@ void NativeCtxMissingCRLCallback(const char* url)
         return;
     }
 
-    /* check if our stored object reference is valid */
-    refcheck = (*jenv)->GetObjectRefType(jenv, g_crlCtxCbIfaceObj);
-    if (refcheck == 2) {
+    /* Promote process-global jobject to a local ref under g_crlCbMutex. Local
+     * ref keeps underlying object alive even if a concurrent setCRLCb()
+     * clears g_crlCtxCbIfaceObj and deletes the prior global ref immediately
+     * after we release the lock. */
+    (void)NativeCrlCbLock();
+    if (g_crlCtxCbIfaceObj != NULL) {
+        crlCbObj = (*jenv)->NewLocalRef(jenv, g_crlCtxCbIfaceObj);
+    }
+    (void)NativeCrlCbUnlock();
 
-        /* lookup WolfSSLMissingCRLCallback class from global object ref */
-        crlClass = (*jenv)->GetObjectClass(jenv, g_crlCtxCbIfaceObj);
+    if (crlCbObj == NULL) {
+        /* No Java callback registered, drop silently. */
+        if (needsDetach) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+        return;
+    }
+
+    /* GetObjectRefType returns non-zero for local/global/weak refs;
+     * crlCbObj is a local ref promoted from a global ref under lock. */
+    refcheck = (*jenv)->GetObjectRefType(jenv, crlCbObj);
+    if (refcheck != 0) {
+
+        /* lookup WolfSSLMissingCRLCallback class from local object ref */
+        crlClass = (*jenv)->GetObjectClass(jenv, crlCbObj);
         if (!crlClass) {
             (*jenv)->ThrowNew(jenv, excClass,
                 "Can't get native WolfSSLMissingCRLCallback class reference");
@@ -1883,7 +2153,7 @@ void NativeCtxMissingCRLCallback(const char* url)
         /* create jstring from char* */
         missingUrl = (*jenv)->NewStringUTF(jenv, url);
 
-        (*jenv)->CallVoidMethod(jenv, g_crlCtxCbIfaceObj, crlMethod,
+        (*jenv)->CallVoidMethod(jenv, crlCbObj, crlMethod,
                 missingUrl);
 
         if ((*jenv)->ExceptionOccurred(jenv)) {

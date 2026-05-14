@@ -31,6 +31,7 @@ import org.junit.rules.TestRule;
 import static org.junit.Assert.*;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
@@ -46,6 +47,8 @@ import com.wolfssl.WolfSSL;
 import com.wolfssl.WolfSSLContext;
 import com.wolfssl.WolfSSLException;
 import com.wolfssl.WolfSSLJNIException;
+import com.wolfssl.WolfSSLVerifyCallback;
+import com.wolfssl.WolfSSLMissingCRLCallback;
 import com.wolfssl.WolfSSLPskClientCallback;
 import com.wolfssl.WolfSSLPskServerCallback;
 import com.wolfssl.WolfSSLSession;
@@ -74,6 +77,12 @@ public class WolfSSLContextTest {
 
     WolfSSLContext ctx;
 
+    /* Hold a strong reference to a WolfSSL instance for the lifetime of
+     * this test class so wolfSSL_Init() runs before any test executes.
+     * Required when surefire/Maven runs this class outside of
+     * WolfSSLTestSuite, whose @BeforeClass would otherwise create one. */
+    private static WolfSSL sslLib = null;
+
     @BeforeClass
     public static void loadLibrary() throws WolfSSLException {
         System.out.println("WolfSSLContext Class");
@@ -83,6 +92,7 @@ public class WolfSSLContextTest {
         } catch (UnsatisfiedLinkError ule) {
             fail("failed to load native JNI library");
         }
+        sslLib = new WolfSSL();
 
         cliCert = WolfSSLTestCommon.getPath(cliCert);
         cliKey = WolfSSLTestCommon.getPath(cliKey);
@@ -668,6 +678,350 @@ public class WolfSSLContextTest {
         } catch (IllegalStateException | WolfSSLJNIException e) {
             e.printStackTrace();
             fail("setMinDHKeySize threw: " + e.getMessage());
+        }
+    }
+
+    /* Custom verify callback class so each test instance is its own Java
+     * object (and therefore its own JNI global ref). */
+    private static class CountingVerifyCb implements WolfSSLVerifyCallback {
+        public int calls = 0;
+        public int verifyCallback(int preverify_ok, long x509StorePtr) {
+            calls++;
+            return preverify_ok;
+        }
+    }
+
+    /* Exercises setVerify ref lifecycle with multiple WolfSSLContext instances
+     * each holding their own callback. Goes through the install, replace,
+     * unregister, and re-install paths, frees one context while the other is
+     * still live, and forces GC to surface any dangling-ref issues under
+     * -Xcheck:jni or Android checked JNI.
+     *
+     * The Java callback objects are referenced at the end of the test
+     * to keep them strongly reachable for the duration of the test. */
+    @Test
+    public void test_WolfSSLContext_setVerifyMultipleContexts()
+        throws WolfSSLException {
+
+        /* Each context owns the WOLFSSL_METHOD it is constructed with and
+         * frees it during free(), so allocate a method per context. */
+        long methodA = WolfSSL.SSLv23_ServerMethod();
+        long methodB = WolfSSL.SSLv23_ServerMethod();
+        Assume.assumeTrue("SSLv23 server method not available",
+            methodA != 0 && methodA != WolfSSL.NOT_COMPILED_IN &&
+            methodB != 0 && methodB != WolfSSL.NOT_COMPILED_IN);
+
+        WolfSSLContext ctxA = new WolfSSLContext(methodA);
+        WolfSSLContext ctxB = new WolfSSLContext(methodB);
+        CountingVerifyCb cbA = new CountingVerifyCb();
+        CountingVerifyCb cbB = new CountingVerifyCb();
+
+        try {
+            /* Register distinct callbacks on each ctx. */
+            ctxA.setVerify(WolfSSL.SSL_VERIFY_PEER, cbA);
+            ctxB.setVerify(WolfSSL.SSL_VERIFY_PEER, cbB);
+
+            /* Replace ctxA's callback with a fresh one, exercises the
+             * prior-ref-release path on the same ctx. */
+            CountingVerifyCb cbA2 = new CountingVerifyCb();
+            ctxA.setVerify(WolfSSL.SSL_VERIFY_PEER, cbA2);
+
+            /* Unregister ctxB's callback (null path). */
+            ctxB.setVerify(WolfSSL.SSL_VERIFY_PEER, null);
+
+            /* Re-register on ctxB after a null pass. */
+            ctxB.setVerify(WolfSSL.SSL_VERIFY_PEER, cbB);
+
+            /* Free ctxA first while ctxB's callback is still live. */
+            ctxA.free();
+            ctxA = null;
+
+            /* ctxB should still be functional (no exception thrown). */
+            ctxB.setVerify(WolfSSL.SSL_VERIFY_PEER, null);
+
+            /* Touch the cb references at the end to defeat any compiler level
+             * liveness shortening that would let GC collect them mid-test. */
+            assertNotNull(cbA);
+            assertNotNull(cbA2);
+            assertNotNull(cbB);
+        } finally {
+            if (ctxA != null) {
+                ctxA.free();
+            }
+            if (ctxB != null) {
+                ctxB.free();
+            }
+        }
+    }
+
+    /* Custom missing CRL callback class so each test instance is its own
+     * Java object (and own JNI global ref). */
+    private static class CountingMissingCRLCb
+        implements WolfSSLMissingCRLCallback {
+        public int calls = 0;
+        public void missingCRLCallback(String url) {
+            calls++;
+        }
+    }
+
+    /* Exercises setCRLCb ref lifecycle for both WolfSSLContext.setCRLCb() and
+     * WolfSSLSession.setCRLCb(). The two globals (g_crlCtxCbIfaceObj and
+     * g_crlCbIfaceObj) are protected by a single process-global mutex
+     * (g_crlCbMutex). This test does install / replace / unregister /
+     * re-install / free paths and forces GC.
+     *
+     * Java callback objects are referenced at the end of the test to keep
+     * them strongly reachable for the duration of the test. */
+    @Test
+    public void test_WolfSSLContext_setCRLCbMultipleContexts()
+        throws Exception {
+
+        /* WolfSSLSession construction requires a CTX with cert and key loaded,
+         * so this test is gated on RSA and filesystem support. */
+        Assume.assumeTrue(WolfSSL.RsaEnabled() && WolfSSL.FileSystemEnabled());
+        Assume.assumeTrue(WolfSSL.TLSv12Enabled());
+
+        WolfSSLContext ctxA = createCtx(cliCert, cliKey, caCert,
+            WolfSSL.TLSv1_2_ClientMethod());
+        WolfSSLContext ctxB = createCtx(cliCert, cliKey, caCert,
+            WolfSSL.TLSv1_2_ClientMethod());
+        WolfSSLSession sesA = null;
+        WolfSSLSession sesB = null;
+        CountingMissingCRLCb cbA = new CountingMissingCRLCb();
+        CountingMissingCRLCb cbB = new CountingMissingCRLCb();
+        CountingMissingCRLCb cbA2 = new CountingMissingCRLCb();
+        CountingMissingCRLCb sesCbA = new CountingMissingCRLCb();
+        CountingMissingCRLCb sesCbB = new CountingMissingCRLCb();
+
+        try {
+            /* Check for HAVE_CRL by attempting a CTX-level register. Skip the
+             * test if CRL is not compiled in. */
+            int probe = ctxA.setCRLCb(cbA);
+            Assume.assumeTrue("CRL not compiled in",
+                probe != WolfSSL.NOT_COMPILED_IN);
+
+            ctxB.setCRLCb(cbB);
+
+            /* Replace ctxA callback with a fresh one, exercises the
+             * prior-ref-release path on the same ctx. */
+            ctxA.setCRLCb(cbA2);
+
+            /* Unregister ctxB callback (null path, should also unregister
+             * the native wolfSSL CRL cb). */
+            ctxB.setCRLCb(null);
+
+            /* Re-register on ctxB after a null pass. */
+            ctxB.setCRLCb(cbB);
+
+            /* Session-level setCRLCb, same pattern on a session created
+             * from each context. */
+            sesA = new WolfSSLSession(ctxA);
+            sesB = new WolfSSLSession(ctxB);
+            sesA.setCRLCb(sesCbA);
+            sesB.setCRLCb(sesCbB);
+            sesA.setCRLCb(null);
+            sesA.setCRLCb(sesCbA);
+
+            /* Force a GC pass to show any dangling refs in checked-JNI
+             * environments before tearing down. */
+            System.gc();
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+
+            /* Free sesA session, then ctxA, while ctxB and sesB still hold
+             * live callbacks. */
+            sesA.freeSSL();
+            sesA = null;
+            ctxA.free();
+            ctxA = null;
+
+            /* ctxB should still be functional (no exception thrown). */
+            ctxB.setCRLCb(null);
+            sesB.setCRLCb(null);
+
+            /* Touch the cb references at the end to defeat any compiler
+             * level liveness shortening that would let GC collect them
+             * mid-test. */
+            assertNotNull(cbA);
+            assertNotNull(cbA2);
+            assertNotNull(cbB);
+            assertNotNull(sesCbA);
+            assertNotNull(sesCbB);
+
+            /* No handshake is done in this test, so no missing-CRL callback
+             * should have fired. A non-zero count would mean native callback
+             * got wired to the wrong jobject or leaked across contexts. */
+            assertEquals("cbA missingCRLCallback fired unexpectedly",
+                0, cbA.calls);
+            assertEquals("cbA2 missingCRLCallback fired unexpectedly",
+                0, cbA2.calls);
+            assertEquals("cbB missingCRLCallback fired unexpectedly",
+                0, cbB.calls);
+            assertEquals("sesCbA missingCRLCallback fired unexpectedly",
+                0, sesCbA.calls);
+            assertEquals("sesCbB missingCRLCallback fired unexpectedly",
+                0, sesCbB.calls);
+
+        } finally {
+            if (sesA != null) {
+                sesA.freeSSL();
+            }
+            if (sesB != null) {
+                sesB.freeSSL();
+            }
+            if (ctxA != null) {
+                ctxA.free();
+            }
+            if (ctxB != null) {
+                ctxB.free();
+            }
+        }
+    }
+
+    /* Do a real handshake on each of two client contexts and assert that each
+     * context's verify callback fires only for its own handshake. */
+    @Test
+    public void test_WolfSSLContext_setVerifyHandshakeRouting()
+        throws Exception {
+
+        Assume.assumeTrue(WolfSSL.RsaEnabled() && WolfSSL.FileSystemEnabled());
+        Assume.assumeTrue(WolfSSL.TLSv12Enabled());
+
+        WolfSSLContext srvCtx = null;
+        WolfSSLContext cliCtxA = null;
+        WolfSSLContext cliCtxB = null;
+        ServerSocket srvSocket = null;
+        ExecutorService es = null;
+        Future<Void> srvFuture = null;
+
+        try {
+            srvCtx = createCtx(svrCert, svrKey, caCert,
+                WolfSSL.TLSv1_2_ServerMethod());
+            cliCtxA = createCtx(cliCert, cliKey, caCert,
+                WolfSSL.TLSv1_2_ClientMethod());
+            cliCtxB = createCtx(cliCert, cliKey, caCert,
+                WolfSSL.TLSv1_2_ClientMethod());
+
+            final CountingVerifyCb cbA = new CountingVerifyCb();
+            final CountingVerifyCb cbB = new CountingVerifyCb();
+            cliCtxA.setVerify(WolfSSL.SSL_VERIFY_PEER, cbA);
+            cliCtxB.setVerify(WolfSSL.SSL_VERIFY_PEER, cbB);
+
+            srvSocket = new ServerSocket(0);
+            srvSocket.setSoTimeout(10000);
+            final int port = srvSocket.getLocalPort();
+            final ServerSocket fSrvSock = srvSocket;
+            final WolfSSLContext fSrvCtx = srvCtx;
+
+            /* Server thread accepts two sequential connections. */
+            es = Executors.newSingleThreadExecutor();
+            srvFuture = es.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    for (int i = 0; i < 2; i++) {
+                        Socket srv = fSrvSock.accept();
+                        WolfSSLSession ses = new WolfSSLSession(fSrvCtx);
+                        try {
+                            int r = ses.setFd(srv);
+                            if (r != WolfSSL.SSL_SUCCESS) {
+                                throw new Exception("srv setFd: " + r);
+                            }
+                            int err;
+                            do {
+                                r = ses.accept();
+                                err = ses.getError(r);
+                            } while (r != WolfSSL.SSL_SUCCESS &&
+                                (err == WolfSSL.SSL_ERROR_WANT_READ ||
+                                 err == WolfSSL.SSL_ERROR_WANT_WRITE));
+                            if (r != WolfSSL.SSL_SUCCESS) {
+                                throw new Exception("srv accept: " + r);
+                            }
+                            ses.shutdownSSL();
+                        } finally {
+                            ses.freeSSL();
+                            srv.close();
+                        }
+                    }
+                    return null;
+                }
+            });
+
+            /* Client A handshake: should fire cbA only. */
+            doClientHandshake(cliCtxA, port);
+            assertTrue("cbA not called for ctxA handshake", cbA.calls > 0);
+            assertEquals("cbB unexpectedly called for ctxA handshake",
+                0, cbB.calls);
+
+            int cbACallsAfterFirst = cbA.calls;
+
+            /* Client B handshake: should fire cbB only. */
+            doClientHandshake(cliCtxB, port);
+            assertTrue("cbB not called for ctxB handshake", cbB.calls > 0);
+            assertEquals("cbA called for ctxB handshake",
+                cbACallsAfterFirst, cbA.calls);
+
+            srvFuture.get(5, TimeUnit.SECONDS);
+        } finally {
+            /* Close the server socket first so any pending accept() unblocks.
+             * Then cancel the future and force the executor to terminate. */
+            if (srvSocket != null && !srvSocket.isClosed()) {
+                srvSocket.close();
+            }
+            if (srvFuture != null) {
+                srvFuture.cancel(true);
+            }
+            if (es != null) {
+                es.shutdownNow();
+                try {
+                    es.awaitTermination(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (cliCtxA != null) {
+                cliCtxA.free();
+            }
+            if (cliCtxB != null) {
+                cliCtxB.free();
+            }
+            if (srvCtx != null) {
+                srvCtx.free();
+            }
+        }
+    }
+
+    /* Helper method to open a TCP socket to localhost:port and complete a TLS
+     * handshake using the given client context. */
+    private void doClientHandshake(WolfSSLContext cliCtx, int port)
+        throws Exception {
+
+        final int socketTimeoutMs = 5000;
+        Socket sock = new Socket();
+        sock.connect(new InetSocketAddress("localhost", port), socketTimeoutMs);
+        sock.setSoTimeout(socketTimeoutMs);
+        WolfSSLSession ses = new WolfSSLSession(cliCtx);
+        try {
+            int r = ses.setFd(sock);
+            if (r != WolfSSL.SSL_SUCCESS) {
+                throw new Exception("cli setFd: " + r);
+            }
+            int err;
+            do {
+                r = ses.connect();
+                err = ses.getError(r);
+            } while (r != WolfSSL.SSL_SUCCESS &&
+                (err == WolfSSL.SSL_ERROR_WANT_READ ||
+                 err == WolfSSL.SSL_ERROR_WANT_WRITE));
+            if (r != WolfSSL.SSL_SUCCESS) {
+                throw new Exception("cli connect: " + r);
+            }
+            ses.shutdownSSL();
+        } finally {
+            ses.freeSSL();
+            sock.close();
         }
     }
 
