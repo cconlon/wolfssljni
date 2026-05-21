@@ -454,6 +454,9 @@ public class WolfSSLImplementSSLSession extends ExtendedSSLSession {
      * @return Object value associated with name
      */
     public Object getValue(String name) {
+        if (name == null) {
+            throw new IllegalArgumentException();
+        }
         return binding.get(name);
     }
 
