@@ -1103,11 +1103,17 @@ public class WolfSSLCertificate implements Serializable {
      * This method supports the following extensions:
      *    - Key Usage (WolfSSL.NID_key_usage)
      *    - Extended Key Usage (WolfSSL.NID_ext_key_usage)
-     *    - Subject Alt Name (WolfSSL.NED_subject_alt_name)
+     *    - Subject Alt Name (WolfSSL.NID_subject_alt_name)
+     *
+     * Note that when adding a Subject Alternative Name with this method,
+     * the value String is encoded as a DNS name (hostname) type entry.
+     * To add Subject Alternative Name entries of other types (e.g., IP
+     * address, email address, URI), use
+     * {@link #addAltName(String, int)} instead.
      *
      * @param nid NID of extension to add. Must be one of:
      *        WolfSSL.NID_key_usage
-     *        WolfSSL.NID_subject_alt_name
+     *        WolfSSL.NID_ext_key_usage
      *        WolfSSL.NID_subject_alt_name
      * @param value String value of extension to set. For keyUsage and
      *              extKeyUsage this should be a comma-delimited list.

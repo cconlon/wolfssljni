@@ -624,6 +624,54 @@ JNIEXPORT jbyteArray JNICALL Java_com_wolfssl_WolfSSLCertRequest_X509_1REQ_1get_
 #endif
 }
 
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertRequest_X509_1add_1altname_1ex
+  (JNIEnv* jenv, jclass jcl, jlong x509ReqPtr, jbyteArray nameBytes, jint type)
+{
+#if !defined(WOLFCRYPT_ONLY) && !defined(NO_CERTS) && \
+    defined(OPENSSL_EXTRA) && defined(WOLFSSL_ALT_NAMES)
+    WOLFSSL_X509* x509 = (WOLFSSL_X509*)(uintptr_t)x509ReqPtr;
+    int ret = WOLFSSL_SUCCESS;
+    unsigned char* name = NULL;
+    int nameSz = 0;
+    (void)jcl;
+
+    if (jenv == NULL || x509 == NULL || nameBytes == NULL) {
+        return WOLFSSL_FAILURE;
+    }
+
+    name = (byte*)(*jenv)->GetByteArrayElements(jenv, nameBytes, NULL);
+    nameSz = (*jenv)->GetArrayLength(jenv, nameBytes);
+
+    if (name == NULL || nameSz <= 0) {
+        ret = WOLFSSL_FAILURE;
+    }
+
+    if (ret == WOLFSSL_SUCCESS) {
+        /* Use wolfSSL_X509_add_altname_ex() over the string-based
+         * wolfSSL_X509_add_altname(), since the latter only gained
+         * ASN_IP_TYPE support (IP string conversion) after wolfSSL
+         * 5.8.4. IP addresses are converted from string to raw binary
+         * representation at the Java level before reaching here. */
+        ret = wolfSSL_X509_add_altname_ex(x509, (const char*)name,
+                (word32)nameSz, (int)type);
+    }
+
+    if (name != NULL) {
+        (*jenv)->ReleaseByteArrayElements(jenv, nameBytes,
+            (jbyte*)name, JNI_ABORT);
+    }
+
+    return (jint)ret;
+#else
+    (void)jenv;
+    (void)jcl;
+    (void)x509ReqPtr;
+    (void)nameBytes;
+    (void)type;
+    return (jint)NOT_COMPILED_IN;
+#endif
+}
+
 JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertRequest_X509_1add_1ext_1via_1nconf_1nid
   (JNIEnv* jenv, jclass jcl, jlong x509ReqPtr, jint nid, jstring extValue, jboolean isCritical)
 {
@@ -664,7 +712,9 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertRequest_X509_1add_1ext_1via_1
         wolfSSL_X509_EXTENSION_free(ext);
     }
 
-    (*jenv)->ReleaseStringUTFChars(jenv, extValue, value);
+    if (value != NULL) {
+        (*jenv)->ReleaseStringUTFChars(jenv, extValue, value);
+    }
 
     return (jint)ret;
 #else

@@ -236,6 +236,148 @@ public class WolfSSLCertRequestTest {
         req.free();
     }
 
+    /* Internal helper method, search haystack for needle byte sequence */
+    private boolean containsByteSubArray(byte[] haystack, byte[] needle) {
+
+        if (haystack == null || needle == null ||
+            needle.length > haystack.length) {
+            return false;
+        }
+
+        for (int i = 0; i <= haystack.length - needle.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /* Internal helper method, build expected DER GeneralName TLV given
+     * context-specific tag number and content bytes. Only supports content
+     * lengths less than 128 bytes (single byte ASN.1 length) */
+    private byte[] buildGeneralNameTLV(int tag, byte[] content) {
+
+        byte[] tlv = new byte[content.length + 2];
+
+        tlv[0] = (byte)(0x80 | tag);
+        tlv[1] = (byte)content.length;
+        System.arraycopy(content, 0, tlv, 2, content.length);
+
+        return tlv;
+    }
+
+    @Test
+    public void testAddAltName() throws WolfSSLException, WolfSSLJNIException,
+        IOException, CertificateException {
+
+        Assume.assumeTrue(WolfSSL.certReqEnabled());
+
+        WolfSSLCertRequest req = new WolfSSLCertRequest();
+        assertNotNull(req);
+
+        /* Set Subject Name */
+        WolfSSLX509Name subjectName = GenerateTestSubjectName();
+        assertNotNull(subjectName);
+        req.setSubjectName(subjectName);
+
+        /* Set Public Key from file */
+        req.setPublicKey(cliKeyPubDer, WolfSSL.RSAk,
+            WolfSSL.SSL_FILETYPE_ASN1);
+
+        /* Add Subject Alternative Name entries of various types. If
+         * altName support is not compiled into native wolfSSL
+         * (WOLFSSL_ALT_NAMES), skip this test instead of failing. Only
+         * the first call needs to be guarded, if it succeeds support
+         * is compiled in for the rest */
+        try {
+            req.addAltName("alt.wolfssl.com", WolfSSL.ASN_DNS_TYPE);
+        } catch (WolfSSLException e) {
+            if (isNotCompiledIn(e)) {
+                subjectName.free();
+                req.free();
+                Assume.assumeNoException(
+                    "altName support not compiled in (WOLFSSL_ALT_NAMES)", e);
+            }
+            throw e;
+        }
+        req.addAltName("test@wolfssl.com", WolfSSL.ASN_RFC822_TYPE);
+        req.addAltName("https://www.wolfssl.com", WolfSSL.ASN_URI_TYPE);
+        req.addAltName("192.168.1.1", WolfSSL.ASN_IP_TYPE);
+        req.addAltName("::1", WolfSSL.ASN_IP_TYPE);
+
+        /* SAN added via addExtension() should combine with entries
+         * added via addAltName() */
+        req.addExtension(WolfSSL.NID_subject_alt_name,
+            "test.wolfssl.com", false);
+
+        /* Invalid IP address string should throw exception */
+        try {
+            req.addAltName("notanip", WolfSSL.ASN_IP_TYPE);
+            fail("Invalid IP address did not throw exception");
+        } catch (WolfSSLException e) {
+            /* expected */
+        }
+
+        /* null name should throw exception */
+        try {
+            req.addAltName(null, WolfSSL.ASN_DNS_TYPE);
+            fail("null altName did not throw exception");
+        } catch (WolfSSLException e) {
+            /* expected */
+        }
+
+        /* Sign CSR */
+        req.signRequest(cliKeyDer, WolfSSL.RSAk,
+            WolfSSL.SSL_FILETYPE_ASN1, "SHA256");
+
+        byte[] derCsr = req.getDer();
+        assertNotNull(derCsr);
+        assertTrue(derCsr.length > 0);
+
+        /* Verify GeneralName entries are encoded in the CSR DER with
+         * correct types. GeneralName tags from RFC 5280:
+         * rfc822Name [1], dNSName [2], URI [6], iPAddress [7] */
+        assertTrue("DNS SAN not found in CSR DER",
+            containsByteSubArray(derCsr, buildGeneralNameTLV(2,
+                "alt.wolfssl.com".getBytes("US-ASCII"))));
+        assertTrue("email SAN not found in CSR DER",
+            containsByteSubArray(derCsr, buildGeneralNameTLV(1,
+                "test@wolfssl.com".getBytes("US-ASCII"))));
+        assertTrue("URI SAN not found in CSR DER",
+            containsByteSubArray(derCsr, buildGeneralNameTLV(6,
+                "https://www.wolfssl.com".getBytes("US-ASCII"))));
+        assertTrue("IPv4 SAN not found in CSR DER",
+            containsByteSubArray(derCsr, buildGeneralNameTLV(7,
+                new byte[] {(byte)192, (byte)168, 1, 1})));
+        assertTrue("IPv6 SAN not found in CSR DER",
+            containsByteSubArray(derCsr, buildGeneralNameTLV(7,
+                new byte[] {0, 0, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 1})));
+        assertTrue("DNS SAN from addExtension() not found in CSR DER",
+            containsByteSubArray(derCsr, buildGeneralNameTLV(2,
+                "test.wolfssl.com".getBytes("US-ASCII"))));
+
+        /* Free native memory */
+        subjectName.free();
+        req.free();
+
+        /* addAltName() after free() should throw IllegalStateException */
+        try {
+            req.addAltName("alt.wolfssl.com", WolfSSL.ASN_DNS_TYPE);
+            fail("addAltName after free did not throw exception");
+        } catch (IllegalStateException e) {
+            /* expected */
+        }
+    }
+
     @Test
     public void testSetVersion()
         throws WolfSSLException, WolfSSLJNIException, IOException,
