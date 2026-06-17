@@ -22,7 +22,10 @@ package com.wolfssl;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.security.PublicKey;
 import java.security.PrivateKey;
@@ -70,6 +73,8 @@ public class WolfSSLCertRequest {
         int keyType, byte[] fileBytes, int format);
     static native byte[] X509_REQ_get_der(long x509);
     static native byte[] X509_REQ_get_pem(long x509);
+    static native int X509_add_altname_ex(long x509ReqPtr, byte[] name,
+        int type);
     static native int X509_add_ext_via_nconf_nid(long x509Ptr, int nid,
         String extValue, boolean isCritical);
     static native int X509_add_ext_via_set_object_boolean(long x509Ptr,
@@ -398,13 +403,140 @@ public class WolfSSLCertRequest {
     }
 
     /**
+     * Convert an IPv4 or IPv6 address String into raw binary byte
+     * representation (4 or 16 bytes). Input format is pre-validated so
+     * that InetAddress.getByName() cannot fall back to DNS hostname
+     * resolution on malformed input.
+     *
+     * @param ipAddress IPv4 or IPv6 address String to convert
+     *
+     * @return byte array holding raw binary IP address representation
+     *
+     * @throws WolfSSLException if input is not a valid IP address string.
+     */
+    private static byte[] ipAddressToBytes(String ipAddress)
+        throws WolfSSLException {
+
+        if (ipAddress.indexOf(':') >= 0) {
+            /* IPv6 candidate. Strings containing ':' are not valid DNS
+             * host names, InetAddress.getByName() will only parse the
+             * String as an IPv6 literal and not fall back to doing a
+             * DNS lookup */
+            try {
+                return InetAddress.getByName(ipAddress).getAddress();
+            } catch (UnknownHostException e) {
+                throw new WolfSSLException(
+                    "Invalid IPv6 address: " + ipAddress, e);
+            }
+        }
+
+        /* IPv4, parse manually to avoid any DNS resolution on
+         * malformed input */
+        String[] octets = ipAddress.split("\\.", -1);
+        if (octets.length != 4) {
+            throw new WolfSSLException(
+                "Invalid IPv4 address: " + ipAddress);
+        }
+
+        byte[] ipBytes = new byte[4];
+        for (int i = 0; i < 4; i++) {
+            if (!octets[i].matches("\\d{1,3}")) {
+                throw new WolfSSLException(
+                    "Invalid IPv4 address: " + ipAddress);
+            }
+            int val = Integer.parseInt(octets[i]);
+            if (val > 255) {
+                throw new WolfSSLException(
+                    "Invalid IPv4 address: " + ipAddress);
+            }
+            ipBytes[i] = (byte)val;
+        }
+
+        return ipBytes;
+    }
+
+    /**
+     * Add subject alternative name for this WolfSSLCertRequest, used when
+     * generating X509 certificate requests (CSRs).
+     *
+     * Each entry added with this method is encoded into the Subject
+     * Alternative Name extension of the generated CSR, using the
+     * GeneralName type given. This method must be called before
+     * signRequest() for entries to be included in the generated CSR.
+     *
+     * @param name String value of subject alternative name to set. For
+     *        WolfSSL.ASN_IP_TYPE, this should be a human-readable IPv4 or
+     *        IPv6 address string (e.g., "127.0.0.1" or "::1")
+     * @param type Type of subject alt name entry, must be one of:
+     *        WolfSSL.ASN_OTHER_TYPE, WolfSSL.ASN_RFC822_TYPE,
+     *        WolfSSL.ASN_DNS_TYPE, WolfSSL.ASN_DIR_TYPE, WolfSSL.ASN_URI_TYPE,
+     *        WolfSSL.ASN_IP_TYPE
+     *
+     * @throws IllegalStateException if WolfSSLCertRequest has been freed.
+     * @throws WolfSSLException if invalid arguments or native JNI error occurs.
+     */
+    public void addAltName(String name, int type)
+        throws IllegalStateException, WolfSSLException {
+
+        int ret = 0;
+        byte[] nameBytes = null;
+
+        confirmObjectIsActive();
+
+        if (name == null || name.isEmpty()) {
+            throw new WolfSSLException(
+                "altName must not be null or empty");
+        }
+
+        if (type == WolfSSL.ASN_IP_TYPE) {
+            /* Convert IP address String into raw binary representation
+             * here, since native wolfSSL_X509_add_altname() only gained
+             * support for converting ASN_IP_TYPE strings in versions
+             * later than 5.8.4. Raw bytes are passed to native
+             * wolfSSL_X509_add_altname_ex(), available in all supported
+             * wolfSSL versions */
+            nameBytes = ipAddressToBytes(name);
+        }
+        else {
+            nameBytes = name.getBytes(StandardCharsets.UTF_8);
+        }
+        final byte[] nameArr = nameBytes;
+
+        synchronized (x509ReqLock) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
+                WolfSSLDebug.INFO, this.x509ReqPtr,
+                () -> "entered addAltName(" + name + ", type: " + type +
+                ", encoded length: " + nameArr.length + ")");
+
+            ret = X509_add_altname_ex(this.x509ReqPtr, nameBytes, type);
+        }
+
+        if (ret == WolfSSL.NOT_COMPILED_IN) {
+            throw new WolfSSLException(
+                "addAltName NOT_COMPILED_IN, native wolfSSL needs to be " +
+                "compiled with WOLFSSL_ALT_NAMES (ret: " + ret + ")");
+        }
+        else if (ret != WolfSSL.SSL_SUCCESS) {
+            throw new WolfSSLException(
+                "Error setting altName into native WOLFSSL_X509_REQ " +
+                "(ret: " + ret + ")");
+        }
+    }
+
+    /**
      * Add an extension to a WolfSSLCertRequest given the NID and extension
      * value String.
      *
      * This method supports the following extensions:
      *    - Key Usage (WolfSSL.NID_key_usage)
      *    - Extended Key Usage (WolfSSL.NID_ext_key_usage)
-     *    - Subject Alt Name (WolfSSL.NED_subject_alt_name)
+     *    - Subject Alt Name (WolfSSL.NID_subject_alt_name)
+     *
+     * Note that when adding a Subject Alternative Name with this method,
+     * the value String is encoded as a DNS name (hostname) type entry.
+     * To add Subject Alternative Name entries of other types (e.g., IP
+     * address, email address, URI), use
+     * {@link #addAltName(String, int)} instead.
      *
      * @param nid NID of extension to add. Must be one of:
      *        WolfSSL.NID_key_usage

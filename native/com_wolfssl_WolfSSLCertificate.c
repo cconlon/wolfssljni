@@ -300,9 +300,8 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1add_1altname
     }
     else {
         ret = wolfSSL_X509_add_altname(x509, name, (int)type);
+        (*jenv)->ReleaseStringUTFChars(jenv, altName, name);
     }
-
-    (*jenv)->ReleaseStringUTFChars(jenv, altName, name);
 
     return (jint)ret;
 #else
@@ -355,7 +354,9 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1add_1ext_1via_1
         wolfSSL_X509_EXTENSION_free(ext);
     }
 
-    (*jenv)->ReleaseStringUTFChars(jenv, extValue, value);
+    if (value != NULL) {
+        (*jenv)->ReleaseStringUTFChars(jenv, extValue, value);
+    }
 
     return (jint)ret;
 #else

@@ -83,6 +83,10 @@ public class X509CertRequest {
         "clientAuth,serverAuth";
     private static String test_ALT_NAME =
         "alt.example.com";
+    private static String test_ALT_NAME_IP =
+        "127.0.0.1";
+    private static String test_ALT_NAME_EMAIL =
+        "test@example.com";
 
     /* Example Attribute values */
     private static String test_CHALLENGE_PASSWORD =
@@ -160,6 +164,11 @@ public class X509CertRequest {
         req.addExtension(WolfSSL.NID_subject_alt_name, test_ALT_NAME, false);
         req.addExtension(WolfSSL.NID_basic_constraints, true, true);
 
+        /* Add Subject Alternative Name entries with explicit types, used
+         * for non-hostname SANs (e.g. IP address, email address) */
+        req.addAltName(test_ALT_NAME_IP, WolfSSL.ASN_IP_TYPE);
+        req.addAltName(test_ALT_NAME_EMAIL, WolfSSL.ASN_RFC822_TYPE);
+
         /* Sign CSR, using existing client key DER */
         req.signRequest(clientKeyDer, WolfSSL.RSAk,
                 WolfSSL.SSL_FILETYPE_ASN1, "SHA256");
@@ -225,6 +234,11 @@ public class X509CertRequest {
         req.addExtension(WolfSSL.NID_ext_key_usage, test_EXT_KEY_USAGE, false);
         req.addExtension(WolfSSL.NID_subject_alt_name, test_ALT_NAME, false);
         req.addExtension(WolfSSL.NID_basic_constraints, true, true);
+
+        /* Add Subject Alternative Name entries with explicit types, used
+         * for non-hostname SANs (e.g. IP address, email address) */
+        req.addAltName(test_ALT_NAME_IP, WolfSSL.ASN_IP_TYPE);
+        req.addAltName(test_ALT_NAME_EMAIL, WolfSSL.ASN_RFC822_TYPE);
 
         /* Sign CSR, using existing client key DER */
         byte[] privKey = Files.readAllBytes(Paths.get(clientKeyDer));
@@ -293,6 +307,11 @@ public class X509CertRequest {
         req.addExtension(WolfSSL.NID_ext_key_usage, test_EXT_KEY_USAGE, false);
         req.addExtension(WolfSSL.NID_subject_alt_name, test_ALT_NAME, false);
         req.addExtension(WolfSSL.NID_basic_constraints, true, true);
+
+        /* Add Subject Alternative Name entries with explicit types, used
+         * for non-hostname SANs (e.g. IP address, email address) */
+        req.addAltName(test_ALT_NAME_IP, WolfSSL.ASN_IP_TYPE);
+        req.addAltName(test_ALT_NAME_EMAIL, WolfSSL.ASN_RFC822_TYPE);
 
         /* Sign CSR, with java.security.PrivateKey */
         PrivateKey privKey = keyPair.getPrivate();

@@ -95,6 +95,14 @@ JNIEXPORT jbyteArray JNICALL Java_com_wolfssl_WolfSSLCertRequest_X509_1REQ_1get_
 
 /*
  * Class:     com_wolfssl_WolfSSLCertRequest
+ * Method:    X509_add_altname_ex
+ * Signature: (J[BI)I
+ */
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertRequest_X509_1add_1altname_1ex
+  (JNIEnv *, jclass, jlong, jbyteArray, jint);
+
+/*
+ * Class:     com_wolfssl_WolfSSLCertRequest
  * Method:    X509_add_ext_via_nconf_nid
  * Signature: (JILjava/lang/String;Z)I
  */
