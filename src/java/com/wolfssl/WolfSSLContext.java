@@ -2278,46 +2278,91 @@ public class WolfSSLContext {
     }
 
     /**
-     * Sets the TLS Supported Curves to be used in the ClientHello
-     * extension if enabled in native wolfSSL.
+     * Sets the TLS Supported Curves to be used in the ClientHello extension
+     * if enabled in native wolfSSL. Multiple curves are appended to the
+     * extension via calls into native wolfSSL_CTX_UseSupportedCurve().
+     * Iteration continues across all entries even after one fails. Curves
+     * that succeed are added, curves that fail are not.
      *
-     * @param curveNames String array of ECC curve names to set into the
-     *        Supported Curve extension. String values should match names from
-     *        the following list:
-     *            "sect163k1", "sect163r1", "sect163r2", "sect193r1",
-     *            "sect193r2", "sect233k1", "sect233r1", "sect239k1",
-     *            "sect283k1", "sect283r1", "sect409k1", "sect409r1",
-     *            "sect571k1", "sect571r1", "secp160k1", "secp160r1",
-     *            "secp160r2", "secp192k1", "secp192r1", "secp224k1",
-     *            "secp224r1", "secp256k1", "secp256r1", "secp384r1",
-     *            "secp521r1", "brainpoolP256r1", "brainpoolP384r1",
-     *            "brainpoolP512r1", "x25519", "x448", "sm2P256v1",
-     *            "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144",
-     *            "ffdhe8192"
+     * @param curveNames String array of named-group names to set into the
+     *        Supported Curves extension. String values may be any token
+     *        recognized by {@link WolfSSL#getNamedGroupFromString}, including
+     *        classical curves (e.g. "secp256r1", "x25519", "ffdhe2048") and
+     *        PQC ML-KEM standalone / hybrid groups (e.g. "ML-KEM-768",
+     *        "X25519MLKEM768", "SECP384R1MLKEM1024").
      *
-     * @return <code>WolfSSL.SSL_SUCCESS</code> on success, otherwise
-     *         negative on error.
+     * @return <code>WolfSSL.SSL_SUCCESS</code> when every entry was accepted
+     *         by native wolfSSL. Otherwise the first non-success return value
+     *         encountered while iterating (typically BAD_FUNC_ARG for an
+     *         unknown / unsupported group, or NOT_COMPILED_IN when
+     *         supported_groups support is not compiled into native wolfSSL).
+     *         Note: the call may have partially succeeded. Curves before/after
+     *         the failing entry that were valid are still added to the
+     *         extension.
      * @throws IllegalStateException WolfSSLContext has been freed
      */
     public int useSupportedCurves(String[] curveNames)
         throws IllegalStateException {
 
-        int ret = 0;
-        int curveEnum = 0;
+        int[] groups = new int[curveNames.length];
+
+        for (int i = 0; i < curveNames.length; i++) {
+            groups[i] = WolfSSL.getNamedGroupFromString(curveNames[i]);
+        }
+
+        return useSupportedCurves(groups);
+    }
+
+    /**
+     * Sets the TLS supported groups (Supported Curves extension) on this
+     * WolfSSLContext, using native wolfSSL named-group enum values. Multiple
+     * groups are appended to the extension via calls into native
+     * wolfSSL_CTX_UseSupportedCurve(). Iteration continues across all entries
+     * even after one fails. Groups that succeed are added, groups that fail
+     * are not.
+     *
+     * @param groups array of named-group enum values from {@link WolfSSL},
+     *        for example {@link WolfSSL#WOLFSSL_ECC_SECP256R1} or
+     *        {@link WolfSSL#WOLFSSL_X25519MLKEM768}, typically obtained
+     *        from {@link WolfSSL#getNamedGroupFromString(String)}.
+     *
+     * @return <code>WolfSSL.SSL_SUCCESS</code> when every entry was accepted
+     *         by native wolfSSL. Otherwise the first non-success return value
+     *         encountered while iterating (typically BAD_FUNC_ARG for an
+     *         unknown / unsupported group, or NOT_COMPILED_IN when
+     *         supported_groups support is not compiled into native wolfSSL).
+     *         Note: the call may have partially succeeded. Groups
+     *         before/after the failing entry that were valid are still
+     *         added to the extension.
+     * @throws IllegalStateException WolfSSLContext has been freed
+     */
+    public int useSupportedCurves(int[] groups)
+        throws IllegalStateException {
+
+        int ret = WolfSSL.SSL_SUCCESS;
+        int firstError = WolfSSL.SSL_SUCCESS;
+
+        confirmObjectIsActive();
 
         WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
             WolfSSLDebug.INFO, getContextPtr(),
             () -> "entered useSupportedCurves(" +
-            Arrays.asList(curveNames) + ")");
+            Arrays.toString(groups) + ")");
 
-        for (String curve : curveNames) {
-            curveEnum = WolfSSL.getNamedGroupFromString(curve);
+        for (int group : groups) {
             synchronized (ctxLock) {
-                ret = useSupportedCurve(getContextPtr(), curveEnum);
+                ret = useSupportedCurve(getContextPtr(), group);
+            }
+            /* Keep adding subsequent groups even if this one failed.
+             * Remember the first failure so the caller can see something
+             * went wrong. */
+            if ((ret != WolfSSL.SSL_SUCCESS) &&
+                (firstError == WolfSSL.SSL_SUCCESS)) {
+                firstError = ret;
             }
         }
 
-        return ret;
+        return firstError;
     }
 
     /**
@@ -2364,7 +2409,7 @@ public class WolfSSLContext {
      * @return <code>WolfSSL.SSL_SUCCESS</code> on success, otherwise negative
      *         value on error. BAD_FUNC_ARG when groups is null, not using
      *         TLS 1.3 or size is greater than WOLFSSL_MAX_GROUP_COUNT (which
-     *         defaults to 10, unless HAVE_PQC is defined then is 36.
+     *         defaults to 10, unless WOLFSSL_HAVE_MLKEM is defined then is 36.
      * @throws IllegalStateException WolfSSLContext has been freed
      */
     public int setGroups(int[] groups)

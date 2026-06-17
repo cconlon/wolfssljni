@@ -25,6 +25,14 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.FileNotFoundException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Base class which wraps the native WolfSSL embedded SSL library.
@@ -588,6 +596,53 @@ public class WolfSSL {
     /** FFDHE 8192 */
     public static final int WOLFSSL_FFDHE_8192    = 260;
 
+    /* ----------------- ML-KEM (FIPS 203) Named Groups ----------------- */
+    /** ML-KEM-512 (FIPS 203, NIST Security Category 1) */
+    public static final int WOLFSSL_ML_KEM_512  = 512;
+    /** ML-KEM-768 (FIPS 203, NIST Security Category 3) */
+    public static final int WOLFSSL_ML_KEM_768  = 513;
+    /** ML-KEM-1024 (FIPS 203, NIST Security Category 5, CNSA 2.0) */
+    public static final int WOLFSSL_ML_KEM_1024 = 514;
+
+    /* Hybrid IETF final codepoints (draft-ietf-tls-ecdhe-mlkem). */
+    /** Hybrid SECP256R1 + ML-KEM-768 (IETF final codepoint 0x11EB) */
+    public static final int WOLFSSL_SECP256R1MLKEM768  = 4587;
+    /** Hybrid X25519 + ML-KEM-768 (IETF final codepoint 0x11EC) */
+    public static final int WOLFSSL_X25519MLKEM768     = 4588;
+    /** Hybrid SECP384R1 + ML-KEM-1024 (IETF final codepoint 0x11ED,
+     *  CNSA 2.0 with hybrid bridge) */
+    public static final int WOLFSSL_SECP384R1MLKEM1024 = 4589;
+
+    /* Hybrid OQS-assigned codepoints (legacy interop).
+     * No IETF-final equivalents exist for these combinations. */
+    /** Hybrid SECP256R1 + ML-KEM-512 (OQS codepoint) */
+    public static final int WOLFSSL_SECP256R1MLKEM512  = 12107;
+    /** Hybrid SECP384R1 + ML-KEM-768 (OQS codepoint) */
+    public static final int WOLFSSL_SECP384R1MLKEM768  = 12108;
+    /** Hybrid SECP521R1 + ML-KEM-1024 (OQS codepoint) */
+    public static final int WOLFSSL_SECP521R1MLKEM1024 = 12109;
+    /** Hybrid X25519 + ML-KEM-512 (OQS codepoint) */
+    public static final int WOLFSSL_X25519MLKEM512     = 12214;
+    /** Hybrid X448 + ML-KEM-768 (OQS codepoint) */
+    public static final int WOLFSSL_X448MLKEM768       = 12215;
+
+    /* --------------------- ML-DSA (FIPS 204) OIDs ---------------------- */
+    /* NIST CSOR algorithm OIDs for ML-DSA. */
+    /** ML-DSA-44 (FIPS 204) algorithm OID */
+    public static final String ML_DSA_44_OID = "2.16.840.1.101.3.4.3.17";
+    /** ML-DSA-65 (FIPS 204) algorithm OID */
+    public static final String ML_DSA_65_OID = "2.16.840.1.101.3.4.3.18";
+    /** ML-DSA-87 (FIPS 204) algorithm OID */
+    public static final String ML_DSA_87_OID = "2.16.840.1.101.3.4.3.19";
+
+    /** ML-DSA (FIPS 204) parameter-set algorithm names, ordered by increasing
+     * security category. Shared by wolfJSSE signature-scheme parsing and the
+     * advertised local supported signature algorithms list, so both cannot
+     * drift apart. */
+    public static final List<String> ML_DSA_PARAM_SET_NAMES =
+        Collections.unmodifiableList(Arrays.asList(
+            "ML-DSA-44", "ML-DSA-65", "ML-DSA-87"));
+
     /* -------------------- Crypto Callback DevID ----------------------- */
     /** Invalid DevID value, when used as devId software crypto is used */
     public static final int INVALID_DEVID = -2;
@@ -1095,6 +1150,43 @@ public class WolfSSL {
      * @return true if enabled, otherwise false if not compiled in.
      */
     public static native boolean Curve448Enabled();
+
+    /**
+     * Tests if ML-KEM (FIPS 203, formerly Kyber) support has been
+     * compiled into native wolfSSL library.
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean MLKEMEnabled();
+
+    /**
+     * Tests if ML-DSA (FIPS 204, formerly Dilithium) support has been
+     * compiled into native wolfSSL library (HAVE_DILITHIUM).
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean MLDSAEnabled();
+
+    /**
+     * Tests if native wolfSSL was built with WOLFSSL_ML_KEM_USE_OLD_IDS.
+     *
+     * When enabled, native wolfSSL additionally recognizes the older
+     * draft codepoints (12103-12105) that preceded the OQS-assigned
+     * codepoints for the ECDSA hybrid groups
+     * {@link #WOLFSSL_SECP256R1MLKEM512} (12107),
+     * {@link #WOLFSSL_SECP384R1MLKEM768} (12108), and
+     * {@link #WOLFSSL_SECP521R1MLKEM1024} (12109). This affects both
+     * sides of the handshake: when one of those hybrid groups is enabled,
+     * a native client also appends the corresponding old codepoint to its
+     * ClientHello supported_groups, and a native server accepts the old
+     * codepoint from older peers. It has no effect on the IETF final
+     * hybrid codepoints ({@link #WOLFSSL_X25519MLKEM768},
+     * {@link #WOLFSSL_SECP256R1MLKEM768}, {@link #WOLFSSL_SECP384R1MLKEM1024}).
+     * The old codepoints are not exposed as Java constants.
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean MLKEMOldIdsEnabled();
 
     /**
      * Tests if filesystem support has been compiled into the wolfSSL library.
@@ -1930,20 +2022,79 @@ public class WolfSSL {
      */
     public static native int getErrno();
 
+    /* PQC (ML-KEM standalone and PQ/T hybrid) named groups. Maps each accepted
+     * name spelling (lowercase) to the native named-group enum value.
+     * getNamedGroupFromString() resolves PQC names from this map and
+     * isPQCNamedGroup() classifies enum values against it, so adding new PQC
+     * group here updates name resolution and PQC classification together. */
+    private static final Map<String, Integer> PQC_GROUP_NAMES;
+    private static final Set<Integer> PQC_GROUP_IDS;
+    static {
+        Map<String, Integer> names = new HashMap<String, Integer>();
+
+        /* ML-KEM standalone (FIPS 203). Accept both the FIPS 203 spelling
+         * ("ML-KEM-N", JDK 24 JEP 496 standard algo name and compact form. */
+        names.put("mlkem512", WOLFSSL_ML_KEM_512);
+        names.put("ml-kem-512", WOLFSSL_ML_KEM_512);
+        names.put("mlkem768", WOLFSSL_ML_KEM_768);
+        names.put("ml-kem-768", WOLFSSL_ML_KEM_768);
+        names.put("mlkem1024", WOLFSSL_ML_KEM_1024);
+        names.put("ml-kem-1024", WOLFSSL_ML_KEM_1024);
+
+        /* Hybrid IETF final codepoints (draft-ietf-tls-ecdhe-mlkem).
+         * IANA spellings use mixed case ("X25519MLKEM768",
+         * "SecP256r1MLKEM768"), matched case insensitively here. */
+        names.put("x25519mlkem768", WOLFSSL_X25519MLKEM768);
+        names.put("secp256r1mlkem768", WOLFSSL_SECP256R1MLKEM768);
+        names.put("secp384r1mlkem1024", WOLFSSL_SECP384R1MLKEM1024);
+
+        /* Hybrid OQS-assigned codepoints (legacy interop). Native wolfSSL only
+         * compiles these in when built with
+         * --enable-experimental --enable-extra-pqc-hybrids. */
+        names.put("secp256r1mlkem512", WOLFSSL_SECP256R1MLKEM512);
+        names.put("secp384r1mlkem768", WOLFSSL_SECP384R1MLKEM768);
+        names.put("secp521r1mlkem1024", WOLFSSL_SECP521R1MLKEM1024);
+        names.put("x25519mlkem512", WOLFSSL_X25519MLKEM512);
+        names.put("x448mlkem768", WOLFSSL_X448MLKEM768);
+
+        PQC_GROUP_NAMES = Collections.unmodifiableMap(names);
+        PQC_GROUP_IDS = Collections.unmodifiableSet(
+            new HashSet<Integer>(names.values()));
+    }
+
     /**
      * Gets the internal wolfSSL named group enum matching provided string.
      *
      * Returned enum values are in Named Groups section above and come from
      * native ssl.h "Named Groups" enum.
      *
-     * @param curveName String representation of ECC curve
+     * Matching is case insensitive, so for example "secp256r1",
+     * "SECP256R1", "X25519MLKEM768", "x25519mlkem768", and the IANA
+     * mixed-case spelling "SecP256r1MLKEM768" are all accepted. SunJSSE
+     * also matches named group tokens case insensitively.
+     *
+     * @param curveName String representation of named group (classical
+     *        ECC/FFDHE curve, ML-KEM standalone, or PQ/T hybrid group)
      * @return Native wolfSSL Named Groups enum value which maps to input
      *         String, or WolfSSL.WOLFSSL_NAMED_GROUP_INVALID if curve
-     *         String not supported.
+     *         String is null or not supported.
      */
-    protected static int getNamedGroupFromString(String curveName) {
+    public static int getNamedGroupFromString(String curveName) {
 
-        switch (curveName) {
+        if (curveName == null) {
+            return WolfSSL.WOLFSSL_NAMED_GROUP_INVALID;
+        }
+
+        /* Locale.ROOT for locale-independent case conversion of protocol. */
+        String name = curveName.toLowerCase(Locale.ROOT);
+
+        /* PQC groups resolve from the shared PQC group table */
+        Integer pqcId = PQC_GROUP_NAMES.get(name);
+        if (pqcId != null) {
+            return pqcId.intValue();
+        }
+
+        switch (name) {
             case "sect163k1":
                 return WolfSSL.WOLFSSL_ECC_SECT163K1;
             case "sect163r1":
@@ -1994,19 +2145,17 @@ public class WolfSSL {
                 return WolfSSL.WOLFSSL_ECC_SECP384R1;
             case "secp521r1":
                 return WolfSSL.WOLFSSL_ECC_SECP521R1;
-            case "brainpoolP256r1":
+            case "brainpoolp256r1":
                 return WolfSSL.WOLFSSL_ECC_BRAINPOOLP256R1;
-            case "brainpoolP384r1":
+            case "brainpoolp384r1":
                 return WolfSSL.WOLFSSL_ECC_BRAINPOOLP384R1;
-            case "brainpoolP512r1":
+            case "brainpoolp512r1":
                 return WolfSSL.WOLFSSL_ECC_BRAINPOOLP512R1;
-            case "X25519":
             case "x25519":
                 return WolfSSL.WOLFSSL_ECC_X25519;
-            case "X448":
             case "x448":
                 return WolfSSL.WOLFSSL_ECC_X448;
-            case "sm2P256v1":
+            case "sm2p256v1":
                 return WolfSSL.WOLFSSL_ECC_SM2P256V1;
             case "ffdhe2048":
                 return WolfSSL.WOLFSSL_FFDHE_2048;
@@ -2020,8 +2169,24 @@ public class WolfSSL {
                 return WolfSSL.WOLFSSL_FFDHE_8192;
             default:
                 return WolfSSL.WOLFSSL_NAMED_GROUP_INVALID;
-
         }
+    }
+
+    /**
+     * Returns true if the given native named-group enum value identifies
+     * a post-quantum (ML-KEM) standalone or PQ/T hybrid TLS 1.3 group.
+     *
+     * @param namedGroup native named-group enum value, typically the
+     *                   result of {@link #getNamedGroupFromString(String)}
+     *                   or one of the WOLFSSL_ML_KEM_* / WOLFSSL_*MLKEM*
+     *                   constants on this class.
+     * @return true if the group is a PQC standalone or hybrid TLS 1.3
+     *         named group, false otherwise (including for
+     *         {@link #WOLFSSL_NAMED_GROUP_INVALID} and any non-PQC
+     *         named group).
+     */
+    public static boolean isPQCNamedGroup(int namedGroup) {
+        return PQC_GROUP_IDS.contains(Integer.valueOf(namedGroup));
     }
 
     @SuppressWarnings({"deprecation", "removal"})

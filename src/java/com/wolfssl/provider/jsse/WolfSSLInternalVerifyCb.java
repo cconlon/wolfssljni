@@ -436,10 +436,85 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
     }
 
     /**
+     * Derive the authType String passed to X509TrustManager
+     * checkClientTrusted() / checkServerTrusted() from the peer's leaf
+     * certificate.
+     *
+     * Derived from the certificate public key algorithm, matching the JDK
+     * convention of using chain[0].getPublicKey().getAlgorithm(). Values map
+     * to the authType strings wolfJSSE has historically passed to
+     * TrustManagers ("RSA", "ECDSA", "DSA", "ED25519", "ED448", "ML-DSA").
+     *
+     * Falls back to deriving from the certificate signature type for key
+     * types the native public-key-type API does not report, and to keep
+     * reporting the historical "ED25519" / "ED448" values for EdDSA keys.
+     *
+     * @param cert peer leaf certificate
+     *
+     * @return authType String, or null if it cannot be determined
+     */
+    public static String getAuthTypeFromPeerCert(WolfSSLCertificate cert) {
+
+        String keyType = null;
+        String authType = null;
+
+        try {
+            keyType = cert.getPubkeyType();
+        } catch (Exception e) {
+            /* Key type unknown to native pubkey-type API, fall back to
+             * signature-type derivation below */
+        }
+
+        if (keyType != null) {
+            if (keyType.equals("RSA") || keyType.equals("RSASSA-PSS")) {
+                /* RSASSA-PSS keys map to "RSA", matching the authType
+                 * String wolfJSSE has historically used for PSS certs */
+                authType = "RSA";
+            } else if (keyType.equals("ECC")) {
+                authType = "ECDSA";
+            } else if (keyType.equals("DSA")) {
+                authType = "DSA";
+            } else if (keyType.equals("ML-DSA")) {
+                authType = "ML-DSA";
+            }
+        }
+
+        if (authType == null) {
+            /* Fall back to certificate signature type. Order matters:
+             * check "ML-DSA" before "DSA" since the latter is a substring
+             * of the former. */
+            String sigType = null;
+            try {
+                sigType = cert.getSignatureType();
+            } catch (Exception e) {
+                return null;
+            }
+            if (sigType == null) {
+                return null;
+            }
+            if (sigType.contains("ML-DSA")) {
+                authType = "ML-DSA";
+            } else if (sigType.contains("RSA")) {
+                authType = "RSA";
+            } else if (sigType.contains("ECDSA")) {
+                authType = "ECDSA";
+            } else if (sigType.contains("DSA")) {
+                authType = "DSA";
+            } else if (sigType.contains("ED25519")) {
+                authType = "ED25519";
+            } else if (sigType.contains("ED448")) {
+                authType = "ED448";
+            }
+        }
+
+        return authType;
+    }
+
+    /**
      * Native wolfSSL verify callback.
      *
      * @param preverify_ok Will be 1 if native wolfSSL verification
-     *        procedured have passed, otherwise 0.
+     *        procedures have passed, otherwise 0.
      * @param x509StorePtr Native pointer to WOLFSSL_X509_STORE structure
      *
      * @return 1 if verification should be considered successful and
@@ -480,8 +555,7 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
         try {
             /* Get WolfSSLCertificate[] from x509StorePtr, certs from
              * store.getCerts() should be listed in order of peer to root */
-            WolfSSLX509StoreCtx store =
-                new WolfSSLX509StoreCtx(x509StorePtr);
+            WolfSSLX509StoreCtx store = new WolfSSLX509StoreCtx(x509StorePtr);
             certs = store.getCerts();
 
         } catch (WolfSSLException e) {
@@ -512,17 +586,8 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
                 x509certs = new X509Certificate[0];
             }
 
-            /* get authType, use first cert */
-            String sigType = certs[0].getSignatureType();
-            if (sigType.contains("RSA")) {
-                authType = "RSA";
-            } else if (sigType.contains("ECDSA")) {
-                authType = "ECDSA";
-            } else if (sigType.contains("DSA")) {
-                authType = "DSA";
-            } else if (sigType.contains("ED25519")) {
-                authType = "ED25519";
-            }
+            /* get authType from the peer's leaf cert */
+            authType = getAuthTypeFromPeerCert(certs[0]);
             final String tmpAuthType = authType;
             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                 () -> "Auth type: " + tmpAuthType);

@@ -6958,6 +6958,11 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLContext_useSupportedCurve
         return (jint)SSL_FAILURE;
     }
 
+    /* Named group codepoints are 16-bit values. Reject out-of-range input. */
+    if (name < 0 || name > 0xFFFF) {
+        return (jint)BAD_FUNC_ARG;
+    }
+
     ret = wolfSSL_CTX_UseSupportedCurve(ctx, (word16)name);
 
     return (jint)ret;
@@ -6973,7 +6978,7 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLContext_useSupportedCurve
 JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLContext_setGroups
   (JNIEnv* jenv, jobject jcl, jlong ctxPtr, jintArray groups)
 {
-#if defined(HAVE_TLS13) && defined(HAVE_SUPPORTED_CURVES)
+#if defined(WOLFSSL_TLS13) && defined(HAVE_SUPPORTED_CURVES)
     int ret = WOLFSSL_FAILURE;
     int groupsSz = 0;
     int* jniGroups = NULL;

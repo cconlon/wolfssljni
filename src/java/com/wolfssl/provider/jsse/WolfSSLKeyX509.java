@@ -39,6 +39,7 @@ import java.util.Set;
 import java.util.Arrays;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.X509ExtendedKeyManager;
+import com.wolfssl.WolfSSL;
 import com.wolfssl.WolfSSLDebug;
 
 /**
@@ -241,7 +242,7 @@ public class WolfSSLKeyX509 extends X509ExtendedKeyManager {
             X509Certificate x509cert = (X509Certificate)cert;
 
             if (type != null &&
-                !x509cert.getPublicKey().getAlgorithm().equals(type)) {
+                !keyTypeMatches(type, x509cert.getPublicKey().getAlgorithm())) {
                 /* different public key type, skip */
                 continue;
             }
@@ -280,6 +281,51 @@ public class WolfSSLKeyX509 extends X509ExtendedKeyManager {
     }
 
     /**
+     * Match a requested key type against a certificate public key algorithm
+     * name. Matching is exact, except for ML-DSA: the "ML-DSA" family name
+     * also matches the parameter-set specific algorithm names ("ML-DSA-44",
+     * "ML-DSA-65", "ML-DSA-87"), and both family and parameter-set types
+     * also match the corresponding raw ML-DSA OID strings. JDK 24+ (JEP 497)
+     * keys report the family name, other providers such as BouncyCastle report
+     * the parameter-set name, and pre-JDK-24 CertificateFactory
+     * implementations can report the raw dotted OID when no installed provider
+     * resolves it.
+     *
+     * @param type requested key type, must not be null
+     * @param keyAlg certificate public key algorithm name
+     *
+     * @return true if keyAlg satisfies the requested type
+     */
+    private static boolean keyTypeMatches(String type, String keyAlg) {
+
+        if (keyAlg == null) {
+            return false;
+        }
+
+        if (keyAlg.equals(type)) {
+            return true;
+        }
+
+        if (type.equals("ML-DSA")) {
+            return keyAlg.startsWith("ML-DSA-") ||
+                   keyAlg.equals(WolfSSL.ML_DSA_44_OID) ||
+                   keyAlg.equals(WolfSSL.ML_DSA_65_OID) ||
+                   keyAlg.equals(WolfSSL.ML_DSA_87_OID);
+        }
+        else if (type.equals("ML-DSA-44")) {
+            return keyAlg.equals(WolfSSL.ML_DSA_44_OID);
+        }
+        else if (type.equals("ML-DSA-65")) {
+            return keyAlg.equals(WolfSSL.ML_DSA_65_OID);
+        }
+        else if (type.equals("ML-DSA-87")) {
+            return keyAlg.equals(WolfSSL.ML_DSA_87_OID);
+        }
+
+        return false;
+    }
+
+    /**
      * Return array of aliases that matches provided type and issuers array.
      * Uses either cached entries or direct KeyStore access based on Security
      * property configuration.
@@ -312,7 +358,7 @@ public class WolfSSLKeyX509 extends X509ExtendedKeyManager {
             X509Certificate cert = certificateCache.get(current);
 
             if (type != null && cert != null &&
-                !cert.getPublicKey().getAlgorithm().equals(type)) {
+                !keyTypeMatches(type, cert.getPublicKey().getAlgorithm())) {
                 /* different public key type, skip */
                 continue;
             }

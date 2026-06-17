@@ -87,6 +87,8 @@ public class ServerJSSE {
         /* set/get enabled protocols */
         String[] protocols = null;
 
+        String pqcAlg = null;                /* PQC named group, -pqc */
+
         try {
 
             /* load WolfSSLprovider */
@@ -168,6 +170,12 @@ public class ServerJSSE {
                 } else if (arg.equals("-ksformat")) {
                     keyStoreFormat = args[++i];
 
+                } else if (arg.equals("-pqc")) {
+                    if (args.length < i+2) {
+                        printUsage();
+                    }
+                    pqcAlg = args[++i];
+
                 } else {
                     printUsage();
                 }
@@ -198,10 +206,28 @@ public class ServerJSSE {
                     System.exit(1);
             }
 
+            /* PQC named groups are TLS 1.3 only. Allow -v 4 (TLS 1.3)
+             * or -v d (generic TLS, which can negotiate TLS 1.3. Reject
+             * everything else up front. */
+            if (pqcAlg != null && sslVersion != 4 && sslVersion != -1) {
+                System.out.println("-pqc requires -v 4 (TLS 1.3) or -v d");
+                System.exit(1);
+            }
+
             if (profileSleep) {
                 System.out.println(
                     "Sleeping 10 seconds to allow profiler to attach");
                 Thread.sleep(10000);
+            }
+
+            /* Single -pqc group. Set wolfjsse.enabledSupportedCurves before
+             * SSLContext is built. wolfJSSE applies the property on the
+             * server too, restricting the groups the server will accept to
+             * the named PQC group only. */
+            if (pqcAlg != null) {
+                Security.setProperty("wolfjsse.enabledSupportedCurves", pqcAlg);
+                System.out.println("Set wolfjsse.enabledSupportedCurves = " +
+                    pqcAlg);
             }
 
             /* set up keystore and truststore */
@@ -350,6 +376,8 @@ public class ServerJSSE {
         System.out.println("-profile\tSleep for 10 sec before/after running " +
                 "to allow profilers to attach");
         System.out.println("-ksformat <str>\tKeyStore format (default: JKS)");
+        System.out.println("-pqc <alg>\tRestrict key exchange to " +
+                "specified post-quantum group only, e.g. X25519MLKEM768");
         System.exit(1);
     }
 

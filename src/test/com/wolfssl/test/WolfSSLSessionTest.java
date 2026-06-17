@@ -4312,5 +4312,131 @@ public class WolfSSLSessionTest {
             }
         }
     }
+
+    @Test
+    public void test_WolfSSLSession_useKeyShare_PQC()
+        throws WolfSSLJNIException, WolfSSLException {
+
+        /* useKeyShare requires TLS 1.3. PQC named groups require native ML-KEM.
+         * Skip if either is missing in this build. */
+        Assume.assumeTrue(WolfSSL.TLSv13Enabled() && WolfSSL.MLKEMEnabled());
+
+        WolfSSLContext tls13Ctx = null;
+        WolfSSLSession ssl = null;
+
+        try {
+            tls13Ctx = new WolfSSLContext(WolfSSL.TLSv1_3_ClientMethod());
+            ssl = new WolfSSLSession(tls13Ctx);
+
+            /* Standalone ML-KEM-768. Builds without
+             * --enable-tls-mlkem-standalone reject the group at runtime with
+             * BAD_FUNC_ARG. Old builds without ML-KEM at all return
+             * NOT_COMPILED_IN. Either is a valid skip reason. */
+            int ret = ssl.useKeyShare(WolfSSL.WOLFSSL_ML_KEM_768);
+            assertTrue("useKeyShare(WOLFSSL_ML_KEM_768) on TLS 1.3 should " +
+                "return SSL_SUCCESS, NOT_COMPILED_IN, or BAD_FUNC_ARG, got " +
+                ret, ret == WolfSSL.SSL_SUCCESS ||
+                ret == WolfSSL.NOT_COMPILED_IN || ret == WolfSSL.BAD_FUNC_ARG);
+
+            /* Hybrid SECP256R1MLKEM768 needs only standard ECC on the
+             * classical side. BAD_FUNC_ARG can still come back on builds where
+             * the hybrid is gated out (e.g. --disable-pqc-hybrids). */
+            ret = ssl.useKeyShare(WolfSSL.WOLFSSL_SECP256R1MLKEM768);
+            assertTrue("useKeyShare(WOLFSSL_SECP256R1MLKEM768) on TLS 1.3 " +
+                "should return SSL_SUCCESS, NOT_COMPILED_IN, or BAD_FUNC_ARG, "
+                + "got " + ret, ret == WolfSSL.SSL_SUCCESS ||
+                ret == WolfSSL.NOT_COMPILED_IN || ret == WolfSSL.BAD_FUNC_ARG);
+
+        } finally {
+            if (ssl != null) {
+                ssl.freeSSL();
+            }
+            if (tls13Ctx != null) {
+                tls13Ctx.free();
+            }
+        }
+    }
+
+    @Test
+    public void test_WolfSSLSession_useKeyShare_AfterFree_Throws()
+        throws WolfSSLJNIException, WolfSSLException {
+
+        Assume.assumeTrue(WolfSSL.TLSv13Enabled());
+
+        WolfSSLContext tls13Ctx =
+            new WolfSSLContext(WolfSSL.TLSv1_3_ClientMethod());
+        WolfSSLSession ssl = new WolfSSLSession(tls13Ctx);
+        ssl.freeSSL();
+
+        try {
+            ssl.useKeyShare(WolfSSL.WOLFSSL_ML_KEM_768);
+            tls13Ctx.free();
+            fail("useKeyShare() after freeSSL() should throw " +
+                 "IllegalStateException");
+        } catch (IllegalStateException e) {
+            /* expected */
+        }
+
+        tls13Ctx.free();
+    }
+
+    /**
+     * useSupportedCurves(String[]) must report a non-success return when any
+     * per-curve native call fails, even when later entries in the list succeed.
+     *
+     * Verified by passing a mixed list [bogus, secp256r1]: the bogus entry's
+     * failure code must propagate as the function return value even though
+     * secp256r1 added cleanly.
+     */
+    @Test
+    public void test_WolfSSLSession_useSupportedCurves_AggregateFailure()
+        throws WolfSSLJNIException, WolfSSLException {
+
+        Assume.assumeTrue(WolfSSL.TLSv12Enabled() ||
+            WolfSSL.TLSv13Enabled());
+
+        WolfSSLContext ctx = null;
+        WolfSSLSession ssl = null;
+
+        try {
+            if (WolfSSL.TLSv13Enabled()) {
+                ctx = new WolfSSLContext(WolfSSL.TLSv1_3_ClientMethod());
+            }
+            else {
+                ctx = new WolfSSLContext(WolfSSL.TLSv1_2_ClientMethod());
+            }
+            ssl = new WolfSSLSession(ctx);
+
+            /* Success baseline. All valid entries should return SSL_SUCCESS. */
+            int ret = ssl.useSupportedCurves(new String[] { "secp256r1" });
+            Assume.assumeTrue("native does not support secp256r1 in this " +
+                "build, cannot run aggregate-failure test",
+                ret == WolfSSL.SSL_SUCCESS);
+
+            /* Mixed list: [bogus_curve_name_xyz, secp256r1].
+             * Invalid name resolves to WOLFSSL_NAMED_GROUP_INVALID, which
+             * native rejects with BAD_FUNC_ARG. secp256r1 is valid. */
+            int mixedRet = ssl.useSupportedCurves(
+                new String[] { "bogus_curve_name_xyz", "secp256r1" });
+            assertTrue("Mixed list with one invalid entry must NOT report " +
+                "success (was: ret=" + mixedRet + ")",
+                mixedRet != WolfSSL.SSL_SUCCESS);
+
+            /* Reverse order, should fail */
+            int reverseRet = ssl.useSupportedCurves(
+                new String[] { "secp256r1", "bogus_curve_name_xyz" });
+            assertTrue("Mixed list (reverse order) with one invalid entry " +
+                "must NOT report success (was: ret=" + reverseRet + ")",
+                reverseRet != WolfSSL.SSL_SUCCESS);
+        }
+        finally {
+            if (ssl != null) {
+                ssl.freeSSL();
+            }
+            if (ctx != null) {
+                ctx.free();
+            }
+        }
+    }
 }
 

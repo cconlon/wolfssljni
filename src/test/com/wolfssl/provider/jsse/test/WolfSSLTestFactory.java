@@ -92,7 +92,7 @@ class WolfSSLTestFactory {
     protected final static String jksPassStr = "wolfSSL test";
     protected final static char[] jksPass = jksPassStr.toCharArray();
     protected String keyStoreType = "JKS";
-    private boolean extraDebug = false;
+    private boolean extraDebug = Boolean.getBoolean("wolfjsse.test.extraDebug");
 
     /**
      * Shared lock for synchronization around tests that modify or use the Java
@@ -600,16 +600,28 @@ class WolfSSLTestFactory {
     protected int testConnection(SSLEngine server, SSLEngine client,
         String[] cipherSuites, String[] protocols, String appData) {
 
-        /* Max loop protection against infinite loops */
+        /* Max loop protection against infinite loops. Bumped from 50 to 200 to
+         * accommodate handshakes with large PQC signatures (eg ML-DSA-87
+         * CertificateVerify is ~4.6 KB) that need more SSLEngine wrap/unwrap
+         * rounds to drain through the fragment-sized in-memory buffers.
+         * Classical handshakes still complete in ~20 iterations. */
         int loops = 0;
-        int maxLoops = 50;
+        int maxLoops = 200;
         boolean handshakeComplete = false;
 
-        /* Allocate buffers large enough for protocol packets */
-        ByteBuffer serToCli = ByteBuffer.allocateDirect(
-            server.getSession().getPacketBufferSize());
-        ByteBuffer cliToSer = ByteBuffer.allocateDirect(
+        /* Allocate network buffers with headroom for handshakes whose server
+         * flight is split across multiple wrap() calls (each up to one TLS
+         * record). With ML-DSA-87 the server flight needs two wraps of ~17 KB
+         * each; if the peer only partially drains the first record before the
+         * next wrap fires, a buffer sized at exactly one packet would
+         * BUFFER_OVERFLOW on the second wrap. 4x packet size gives enough
+         * headroom for the largest PQC handshakes we test while still
+         * bounding allocation. */
+        int netBufSize = 4 * Math.max(
+            server.getSession().getPacketBufferSize(),
             client.getSession().getPacketBufferSize());
+        ByteBuffer serToCli = ByteBuffer.allocateDirect(netBufSize);
+        ByteBuffer cliToSer = ByteBuffer.allocateDirect(netBufSize);
 
         /* Application data buffers */
         ByteBuffer toSendCli = ByteBuffer.wrap(appData.getBytes());

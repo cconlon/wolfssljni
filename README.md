@@ -566,7 +566,7 @@ and used by wolfSSL JNI/JSSE.
 | wolfssl.readWriteByteBufferPool.size | 16 | Integer | Sets the read/write per-thread ByteBuffer pool size |
 | wolfssl.readWriteByteBufferPool.bufferSize | 17408 | String | Sets the read/write per-thread ByteBuffer size |
 | wolfjsse.enabledCipherSuites | | String | Restricts enabled cipher suites |
-| wolfjsse.enabledSupportedCurves | | String | Restricts enabled ECC curves |
+| wolfjsse.enabledSupportedCurves | | String | Restricts enabled named groups (ECC curves and PQC/hybrid groups) |
 | wolfjsse.enabledSignatureAlgorithms | | String | Restricts enabled signature algorithms |
 | wolfjsse.keystore.type.required | | String | Restricts KeyStore type |
 | wolfjsse.clientSessionCache.disabled | | "true" | Disables client session cache |
@@ -617,14 +617,32 @@ changing this property. This should be a comma-delimited String. Example use:
 wolfjsse.enabledCipherSuites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 ```
 
-**wolfjsse.enabledSupportedCurves (String)** - Allows setting of specific ECC
-curves to be enabled for SSL/TLS connections. This propogates down to the native
-wolfSSL API `wolfSSL_UseSupportedCurve()`. If invalid/bad values are found
-when processing this property, connection establishment will fail with an
-SSLException. This should be a comma-delimited String. Example use:
+**wolfjsse.enabledSupportedCurves (String)** - Allows setting of specific
+named groups (ECC curves and post-quantum / hybrid groups such as ML-KEM)
+to be enabled for SSL/TLS connections, on both the client and server side.
+This propagates down to the native wolfSSL API `wolfSSL_UseSupportedCurve()`.
+Unknown group names and groups not supported by the native wolfSSL build are
+ignored, matching the JDK contract for named-group configuration (the JDK 20+
+`SSLParameters.setNamedGroups()` javadoc and SunJSSE handling of
+`jdk.tls.namedGroups`). If no usable groups remain for the session (for
+example all groups are unrecognized, or all groups are PQC and TLS 1.3 is
+not enabled), connection establishment fails with an SSLException, matching
+SunJSSE behavior when `jdk.tls.namedGroups` contains no supported named
+groups. This should be a comma-delimited String. Group names
+are matched case insensitively. Both compact (`MLKEM768`, `X25519MLKEM768`)
+and IETF (`ML-KEM-768`, `SecP256r1MLKEM768`) spellings are recognized for PQC
+and hybrid groups when native wolfSSL was built with `--enable-mlkem`. This
+property is the lowest-precedence named-groups source: it is overridden by
+the `jdk.tls.namedGroups` System property, which in turn is overridden by
+the `SSLParameters.setNamedGroups()` API (JDK 20+). Only a single source
+is applied per session. Example use:
 
 ```
 wolfjsse.enabledSupportedCurves=secp256r1, secp521r1
+```
+
+```
+wolfjsse.enabledSupportedCurves=X25519MLKEM768, SecP256r1MLKEM768, ML-KEM-768
 ```
 
 **wolfjsse.enabledSignatureAlgorithms (String)** - Allows restriction of the
@@ -637,6 +655,30 @@ String of signature algorithm + MAC combinations. Example use:
 ```
 wolfjsse.enabledSignatureAlgorithms=RSA+SHA256:ECDSA+SHA256
 ```
+
+Entries not supported by the native wolfSSL build are ignored, matching the
+JDK contract for signature scheme configuration (the JDK 19+
+`SSLParameters.setSignatureSchemes()` javadoc states providers should ignore
+unknown signature scheme names). If no entry in the list is supported,
+connection establishment fails with an SSLException rather than silently
+proceeding with default signature algorithms.
+
+Standalone scheme tokens (no MAC component) are also accepted, including
+ED25519, ED448, and the FIPS 204 ML-DSA names (`ML-DSA-44`, `ML-DSA-65`,
+`ML-DSA-87`):
+
+```
+wolfjsse.enabledSignatureAlgorithms=ML-DSA-87:ECDSA+SHA384
+```
+
+Note: the ML-DSA names additionally require a native wolfSSL version whose
+signature-algorithm list parser accepts ML-DSA entries. As of wolfSSL 5.9.1,
+native `wolfSSL_set1_sigalgs_list()` does not accept ML-DSA names. wolfJSSE
+probes each configured entry against the native parser and skips entries
+native does not support (with an INFO debug log), so until native support is
+available ML-DSA entries are ignored and remaining supported entries still
+apply. Connections fail with an SSLException only when no configured entry
+is supported.
 
 **wolfjsse.keystore.type.required (String)** - Can be used to specify a KeyStore
 type that is required to be used. If this is set, wolfJSSE will not allow use
@@ -718,11 +760,36 @@ are enabled in different ways depending on the JDK implementation. For
 Oracle/OpenJDK and variants, this System property enables session tickets and
 was added in Java 13. Should be set to "true" to enable.
 
-**jdk.tls.server.SignatureSchemes (String)** - Controls which signature algorithms are
-advertised and used by the server if set.
+**jdk.tls.server.SignatureSchemes (String)** - Controls which signature
+algorithms are advertised and used by the server if set. Scheme names not
+recognized by wolfJSSE or not supported by the native wolfSSL build are ignored
+(matching SunJSSE). If no configured scheme is supported, connection
+establishment fails with an SSLException.
 
-**jdk.tls.client.SignatureSchemes (String)** - Controls which signature algorithms are
-advertised and used by the client if set.
+**jdk.tls.client.SignatureSchemes (String)** - Controls which signature
+algorithms are advertised and used by the client if set. Scheme names not
+recognized by wolfJSSE or not supported by the native wolfSSL build are ignored
+(matching SunJSSE). If no configured scheme is supported, connection
+establishment fails with an SSLException.
+
+**jdk.tls.namedGroups (String)** - Comma-delimited list of TLS named groups
+to advertise and accept, applied on both the client and server side
+(matching SunJSSE behavior on JDK 20+). Group names are matched case
+insensitively and recognize both classical curves (`secp256r1`,
+`secp384r1`) and PQC / hybrid groups (`X25519MLKEM768`, `SecP256r1MLKEM768`,
+`ML-KEM-768`) when native wolfSSL was built with `--enable-mlkem`. Precedence
+when multiple sources are set: `SSLParameters.setNamedGroups()` (JDK 20,
+JDK-8281236) overrides this property, and this property overrides the
+`wolfjsse.enabledSupportedCurves` Security property. Only a single source is
+applied per session. Unknown group names and groups not supported by the
+native wolfSSL build are ignored (matching SunJSSE). If the list yields no
+usable groups at all, connection establishment fails with an SSLException,
+matching SunJSSE behavior when `jdk.tls.namedGroups` contains no supported
+named groups.
+
+```
+java -Djdk.tls.namedGroups=X25519MLKEM768,secp256r1 ...
+```
 
 **jdk.tls.useExtendedMasterSecret (boolean)** - Can be used to enable or
 disable the use of the Extended Master Secret (EMS) extension. This extension
@@ -731,18 +798,18 @@ false.
 
 **wolfjsse.autoSNI (boolean)** - Controls automatic Server Name Indication (SNI)
 extension setting based on hostname or peer address. When set to "true", enables
-legacy behavior where SNI is automatically configured from hostname/peer information
-even without explicit SSLParameters configuration. Default value is "false", where
-SNI is only set when explicitly configured through SSLParameters.
+legacy behavior where SNI is automatically configured from hostname/peer
+information even without explicit SSLParameters configuration. Default value is
+"false", where SNI is only set when explicitly configured through SSLParameters.
 
-**wolfssl.skipLibraryLoad (boolean)** - When set to "true", `wolfSSL.loadLibrary()`
-will skip the default `System.loadLibrary()` calls for native wolfSSL and
-wolfSSL JNI libraries. This is useful when applications need to load the native
-libraries themselves using custom logic, for example when bundling the native
-library inside a JAR file and extracting it at runtime. The property must be set
-before `wolfSSL.loadLibrary()` is called, either directly or via
-`WolfSSLProvider()` constructor. Applications can check if library loading was
-skipped by calling `wolfSSL.isLibraryLoadSkipped()`.
+**wolfssl.skipLibraryLoad (boolean)** - When set to "true",
+`wolfSSL.loadLibrary()` will skip the default `System.loadLibrary()` calls for
+native wolfSSL and wolfSSL JNI libraries. This is useful when applications need
+to load the native libraries themselves using custom logic, for example when
+bundling the native library inside a JAR file and extracting it at runtime. The
+property must be set before `wolfSSL.loadLibrary()` is called, either directly
+or via `WolfSSLProvider()` constructor. Applications can check if library
+loading was skipped by calling `wolfSSL.isLibraryLoadSkipped()`.
 
 Setting via command line:
 

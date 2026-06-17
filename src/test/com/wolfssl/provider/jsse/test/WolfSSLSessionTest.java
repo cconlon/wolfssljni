@@ -541,6 +541,131 @@ public class WolfSSLSessionTest {
         }
     }
 
+    /* Tests that signature scheme tokens not supported by the native
+     * wolfSSL build are ignored rather than failing the connection,
+     * matching the JDK contract that providers ignore unknown signature
+     * scheme names. ML-DSA scheme names are accepted by wolfJSSE, but
+     * native wolfSSL_set1_sigalgs_list() may not accept them. The
+     * handshake must succeed using the remaining classical scheme whether
+     * or not native ML-DSA sigalg list support is available.
+     */
+    @Test
+    public void testSignatureSchemesUnsupportedTokenIgnored()
+        throws NoSuchAlgorithmException, KeyManagementException,
+               KeyStoreException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        int ret;
+        String cSigSchemes = "jdk.tls.client.SignatureSchemes";
+        String sSigSchemes = "jdk.tls.server.SignatureSchemes";
+        String origClient = System.getProperty(cSigSchemes);
+        String origServer = System.getProperty(sSigSchemes);
+        String schemes;
+
+        if (WolfSSL.EccEnabled()) {
+            schemes = "mldsa65,ecdsa_secp256r1_sha256";
+        }
+        else {
+            schemes = "mldsa65,rsa_pkcs1_sha256";
+        }
+
+        try {
+            System.setProperty(cSigSchemes, schemes);
+            System.setProperty(sSigSchemes, schemes);
+
+            SSLContext ctx = tf.createSSLContext("TLS", engineProvider);
+            SSLEngine client = ctx.createSSLEngine("server", 12345);
+            SSLEngine server = ctx.createSSLEngine();
+
+            if (client == null || server == null) {
+                fail("failed to create engine");
+                return;
+            }
+
+            server.setUseClientMode(false);
+            server.setNeedClientAuth(false);
+            client.setUseClientMode(true);
+
+            ret = tf.testConnection(server, client, null, null,
+                "Test unsupported scheme ignored");
+            if (ret != 0) {
+                fail("Handshake failed, unsupported scheme token in " +
+                     "SignatureSchemes property should be ignored");
+            }
+
+        } finally {
+            /* Restore properties */
+            if (origClient != null) {
+                System.setProperty(cSigSchemes, origClient);
+            } else {
+                System.clearProperty(cSigSchemes);
+            }
+
+            if (origServer != null) {
+                System.setProperty(sSigSchemes, origServer);
+            } else {
+                System.clearProperty(sSigSchemes);
+            }
+        }
+    }
+
+    /* Tests that a SignatureSchemes property list containing no usable
+     * schemes fails with SSLException during handshake setup, matching
+     * SunJSSE behavior when a restriction yields no supported schemes.
+     * Uses a scheme name that will never be recognized.
+     */
+    @Test
+    public void testSignatureSchemesAllUnsupportedFailsClosed()
+        throws NoSuchAlgorithmException, KeyManagementException,
+               KeyStoreException, CertificateException, IOException,
+               NoSuchProviderException, UnrecoverableKeyException {
+
+        int ret;
+        String cSigSchemes = "jdk.tls.client.SignatureSchemes";
+        String sSigSchemes = "jdk.tls.server.SignatureSchemes";
+        String origClient = System.getProperty(cSigSchemes);
+        String origServer = System.getProperty(sSigSchemes);
+
+        try {
+            System.setProperty(cSigSchemes, "bogus_scheme_sha256");
+            System.setProperty(sSigSchemes, "bogus_scheme_sha256");
+
+            SSLContext ctx = tf.createSSLContext("TLS", engineProvider);
+            SSLEngine client = ctx.createSSLEngine("server", 12345);
+            SSLEngine server = ctx.createSSLEngine();
+
+            if (client == null || server == null) {
+                fail("failed to create engine");
+                return;
+            }
+
+            server.setUseClientMode(false);
+            server.setNeedClientAuth(false);
+            client.setUseClientMode(true);
+
+            ret = tf.testConnection(server, client, null, null,
+                "Test all-unsupported schemes");
+            if (ret == 0) {
+                fail("Handshake succeeded but SignatureSchemes property " +
+                     "with no usable schemes should fail connection setup");
+            }
+
+        } finally {
+            /* Restore properties */
+            if (origClient != null) {
+                System.setProperty(cSigSchemes, origClient);
+            } else {
+                System.clearProperty(cSigSchemes);
+            }
+
+            if (origServer != null) {
+                System.setProperty(sSigSchemes, origServer);
+            } else {
+                System.clearProperty(sSigSchemes);
+            }
+        }
+    }
+
     /**
      * Test SSLSession.hashCode().
      *

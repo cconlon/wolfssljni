@@ -44,6 +44,10 @@ public class WolfSSLParametersHelper
     private static Method setMaximumPacketSize = null;
     private static Method setUseCipherSuitesOrder = null;
     private static Method getUseCipherSuitesOrder = null;
+    private static Method getNamedGroups = null;
+    private static Method setNamedGroups = null;
+    private static Method getSignatureSchemes = null;
+    private static Method setSignatureSchemes = null;
 
     /** Default WolfSSLParametersHelper constructor */
     public WolfSSLParametersHelper() { }
@@ -106,6 +110,18 @@ public class WolfSSLParametersHelper
                                     continue;
                                 case "getUseCipherSuitesOrder":
                                     getUseCipherSuitesOrder = m;
+                                    continue;
+                                case "getNamedGroups":
+                                    getNamedGroups = m;
+                                    continue;
+                                case "setNamedGroups":
+                                    setNamedGroups = m;
+                                    continue;
+                                case "getSignatureSchemes":
+                                    getSignatureSchemes = m;
+                                    continue;
+                                case "setSignatureSchemes":
+                                    setSignatureSchemes = m;
                                     continue;
                                 default:
                                     continue;
@@ -221,6 +237,19 @@ public class WolfSSLParametersHelper
             }
         } catch (Exception e) {
             /* Not available, just ignore and continue */
+        }
+
+        /* These are no-ops when the host JDK lacks SSLParameters named-groups
+         * (JDK 20, JDK-8281236) or signature-schemes (JDK 19, JDK-8280494)
+         * support. Returned object is newly created, so null (unset) needs no
+         * explicit clear. */
+        String[] groups = getNamedGroupsFromParams(in);
+        if (groups != null) {
+            setNamedGroupsOnParams(ret, groups);
+        }
+        String[] schemes = getSignatureSchemesFromParams(in);
+        if (schemes != null) {
+            setSignatureSchemesOnParams(ret, schemes);
         }
 
         /* The following SSLParameters features are not yet supported
@@ -345,6 +374,16 @@ public class WolfSSLParametersHelper
             /* Not available, just ignore and continue */
         }
 
+        /* Copy namedGroups and signatureSchemes unconditionally, including
+         * null. JDK contract for setSSLParameters() is full replacement.
+         * An incoming SSLParameters with no value set (null) reverts the
+         * session to provider defaults, so any previously imported
+         * restriction must be cleared rather than left in place. The helpers
+         * are no-ops when the host JDK lacks SSLParameters named-groups
+         * (JDK 20, JDK-8281236) or signature-schemes (JDK 19, JDK-8280494). */
+        setNamedGroupsOnParams(out, getNamedGroupsFromParams(in));
+        setSignatureSchemesOnParams(out, getSignatureSchemesFromParams(in));
+
         /* If input is a WolfSSLParameters, copy wolfJSSE specific fields
          * that are not part of the standard SSLParameters API */
         if (in instanceof WolfSSLParameters) {
@@ -383,6 +422,107 @@ public class WolfSSLParametersHelper
                 out.setWolfSSLServerNames(null);
             }
         }
+    }
+
+    /**
+     * Invoke a cached reflective SSLParameters String[] getter.
+     *
+     * @param method cached Method to invoke, null when the host JDK does
+     *               not expose the API
+     * @param in SSLParameters instance to read from (may be null)
+     *
+     * @return cloned String[] result, or null if unset / unavailable
+     */
+    private static String[] getStringArrayViaMethod(Method method,
+        SSLParameters in) {
+
+        if (in == null || method == null) {
+            return null;
+        }
+
+        try {
+            Object val = method.invoke(in);
+            if (val instanceof String[]) {
+                String[] arr = (String[]) val;
+                return arr.clone();
+            }
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            /* fall through to null */
+        }
+
+        return null;
+    }
+
+    /**
+     * Invoke a cached reflective SSLParameters String[] setter. Noop when
+     * the host JDK does not expose the method.
+     *
+     * @param method cached Method to invoke, null when the host JDK does
+     *               not expose the API
+     * @param out SSLParameters instance to write to (may be null)
+     * @param values String[] value to set (may be null to clear)
+     */
+    private static void setStringArrayViaMethod(Method method,
+        SSLParameters out, String[] values) {
+
+        if (out == null || method == null) {
+            return;
+        }
+
+        try {
+            method.invoke(out, (Object) values);
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            /* Noop on failure */
+        }
+    }
+
+    /**
+     * Reflective accessor for SSLParameters.getNamedGroups(). Returns the
+     * named groups array if the host JDK has the method and the application
+     * set a value, otherwise null.
+     *
+     * @param in SSLParameters instance to read from (may be null)
+     * @return cloned named-groups array, or null if unset / unavailable
+     */
+    public static String[] getNamedGroupsFromParams(SSLParameters in) {
+        return getStringArrayViaMethod(getNamedGroups, in);
+    }
+
+    /**
+     * Reflective mutator for SSLParameters.setNamedGroups(). Noop when the
+     * host JDK does not expose the method.
+     *
+     * @param out SSLParameters instance to write to (must be non-null)
+     * @param groups named-groups array to set (may be null to clear)
+     */
+    public static void setNamedGroupsOnParams(SSLParameters out,
+        String[] groups) {
+        setStringArrayViaMethod(setNamedGroups, out, groups);
+    }
+
+    /**
+     * Reflective accessor for SSLParameters.getSignatureSchemes() (JDK 19,
+     * JDK-8280494). Returns the signature schemes array if the host JDK
+     * has the method and the application set a value, otherwise null.
+     *
+     * @param in SSLParameters instance to read from (may be null)
+     * @return cloned signature-schemes array, or null if unset or
+     *         unavailable
+     */
+    public static String[] getSignatureSchemesFromParams(SSLParameters in) {
+        return getStringArrayViaMethod(getSignatureSchemes, in);
+    }
+
+    /**
+     * Reflective mutator for SSLParameters.setSignatureSchemes(). Noop when
+     * the host JDK does not expose the method.
+     *
+     * @param out SSLParameters instance to write to (must be non-null)
+     * @param schemes signature-schemes array to set (may be null to clear)
+     */
+    public static void setSignatureSchemesOnParams(SSLParameters out,
+        String[] schemes) {
+        setStringArrayViaMethod(setSignatureSchemes, out, schemes);
     }
 }
 

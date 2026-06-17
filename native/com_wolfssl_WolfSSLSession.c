@@ -6498,6 +6498,11 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useSupportedCurve
         return (jint)SSL_FAILURE;
     }
 
+    /* Named group codepoints are 16-bit values. Reject out-of-range input. */
+    if (name < 0 || name > 0xFFFF) {
+        return (jint)BAD_FUNC_ARG;
+    }
+
     ret = wolfSSL_UseSupportedCurve(ssl, (word16)name);
 
     return (jint)ret;
@@ -6506,6 +6511,35 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useSupportedCurve
     (void)jcl;
     (void)sslPtr;
     (void)name;
+    return (jint)NOT_COMPILED_IN;
+#endif
+}
+
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useKeyShare
+  (JNIEnv* jenv, jobject jcl, jlong sslPtr, jint group)
+{
+#if defined(WOLFSSL_TLS13) && defined(HAVE_SUPPORTED_CURVES)
+    int ret = 0;
+    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
+    (void)jcl;
+
+    if (jenv == NULL || ssl == NULL) {
+        return (jint)SSL_FAILURE;
+    }
+
+    /* Named group codepoints are 16-bit values. Reject out-of-range input. */
+    if (group < 0 || group > 0xFFFF) {
+        return (jint)BAD_FUNC_ARG;
+    }
+
+    ret = wolfSSL_UseKeyShare(ssl, (word16)group);
+
+    return (jint)ret;
+#else
+    (void)jenv;
+    (void)jcl;
+    (void)sslPtr;
+    (void)group;
     return (jint)NOT_COMPILED_IN;
 #endif
 }

@@ -135,6 +135,53 @@ jobs:
       jdk_version: ${{ matrix.jdk_version }}
       wolfssl_configure: ${{ matrix.wolfssl_configure }}
 
+  # --------------- PQC (ML-KEM + ML-DSA) sanity check -----------------
+  # Builds native wolfSSL master with the standard PQC option set so that
+  # ML-KEM standalone groups, the IETF-final ML-KEM PQ/T hybrids
+  # (X25519MLKEM768, SECP256R1MLKEM768, SECP384R1MLKEM1024), and ML-DSA
+  # cert auth all reach the gated tests instead of skipping. JDK 24 is
+  # required for JEP 497 ML-DSA KeyFactory and exercises the standard JCE
+  # keystore path. JDK 11 also runs to cover the JDK-8-compatible PEM-based
+  # PQC code path. The --enable-all variant additionally layers on top of
+  # the PQC flags to catch interaction regressions.
+  linux-zulu-pqc:
+    strategy:
+      matrix:
+        os: [ 'ubuntu-latest' ]
+        jdk_version: [ '11', '24' ]
+        wolfssl_configure: [
+            '--enable-jni --enable-mlkem --enable-tls-mlkem-standalone --enable-mldsa --enable-curve25519 --enable-curve448 --enable-ed25519 --enable-ed448',
+            '--enable-jni --enable-all --enable-mlkem --enable-tls-mlkem-standalone --enable-mldsa --enable-curve25519 --enable-curve448 --enable-ed25519 --enable-ed448',
+        ]
+    name: ${{ matrix.os }} (Zulu JDK ${{ matrix.jdk_version }}, PQC full)
+    uses: ./.github/workflows/linux-common.yml
+    with:
+      os: ${{ matrix.os }}
+      jdk_distro: "zulu"
+      jdk_version: ${{ matrix.jdk_version }}
+      wolfssl_configure: ${{ matrix.wolfssl_configure }}
+
+  # --------- PQC experimental OQS-codepoint hybrids sanity check -------
+  # The OQS-assigned hybrid codepoints require wolfSSL's experimental gate
+  # plus --enable-extra-pqc-hybrids. This variant exists so the Java constants
+  # for those groups (WOLFSSL_SECP256R1MLKEM512, WOLFSSL_X448MLKEM768, etc.)
+  # are exercised against a native build that actually accepts them.
+  linux-zulu-pqc-experimental:
+    strategy:
+      matrix:
+        os: [ 'ubuntu-latest' ]
+        jdk_version: [ '24' ]
+        wolfssl_configure: [
+            '--enable-jni --enable-mlkem --enable-tls-mlkem-standalone --enable-mldsa --enable-curve25519 --enable-curve448 --enable-ed25519 --enable-ed448 --enable-experimental --enable-extra-pqc-hybrids',
+        ]
+    name: ${{ matrix.os }} (Zulu JDK ${{ matrix.jdk_version }}, PQC experimental hybrids)
+    uses: ./.github/workflows/linux-common.yml
+    with:
+      os: ${{ matrix.os }}
+      jdk_distro: "zulu"
+      jdk_version: ${{ matrix.jdk_version }}
+      wolfssl_configure: ${{ matrix.wolfssl_configure }}
+
   # -------------------- WOLFJNI_USE_IO_SELECT sanity check --------------------
   # Only check one Linux and Mac JDK version as a sanity check.
   # Using Zulu, but this can be expanded if needed.
