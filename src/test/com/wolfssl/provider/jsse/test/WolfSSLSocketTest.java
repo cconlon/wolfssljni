@@ -39,6 +39,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 
@@ -119,6 +120,8 @@ import com.wolfssl.WolfSSLException;
     public void testGetSSLParameters();
     public void testAddHandshakeCompletedListener();
     public void testGetSession();
+    public void testConnectSocketAddressPreservesHostname();
+    public void testConnectSocketAddressHttpsEndpointIdentification();
     public void testSetNeedClientAuth();
     public void testProtocolTLSv10();
     public void testProtocolTLSv11();
@@ -1749,6 +1752,282 @@ public class WolfSSLSocketTest {
         serverFuture.get();
         ss.close();
 
+    }
+
+    /**
+     * Shared cleanup-path helper for createSocket()/connect() test helpers.
+     * Closes the client and server sockets, shuts down executor, drains
+     * server-handshake Future, closes the server socket.
+     */
+    private void closeHandshakeResources(SSLSocket cs, SSLSocket server,
+        ExecutorService es, Future<?> serverFuture, SSLServerSocket ss) {
+
+        if (cs != null) {
+            try {
+                cs.close();
+            } catch (IOException e) {
+                /* ignore on cleanup path */
+            }
+        }
+        if (server != null) {
+            try {
+                server.close();
+            } catch (IOException e) {
+                /* ignore on cleanup path */
+            }
+        }
+        if (es != null) {
+            es.shutdown();
+        }
+        if (serverFuture != null) {
+            try {
+                serverFuture.get(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                /* restore interrupt status and stop waiting */
+                Thread.currentThread().interrupt();
+            } catch (TimeoutException e) {
+                /* server task still running: force it down so a non-daemon
+                 * thread cannot keep the test JVM alive */
+                if (es != null) {
+                    es.shutdownNow();
+                }
+            } catch (Exception e) {
+                /* ignore on cleanup path */
+            }
+        }
+        if (ss != null) {
+            try {
+                ss.close();
+            } catch (IOException e) {
+                /* ignore on cleanup path */
+            }
+        }
+    }
+
+    /**
+     * Helper for testConnectSocketAddressPreservesHostname().
+     *
+     * Creates a client SSLSocket with no host/port (createSocket()), then
+     * connect()s it to a local loopback server using an InetSocketAddress
+     * built from the provided connectAddr. The server is bound explicitly to
+     * the loopback interface and the client connects to that same loopback
+     * address, so the connection never depends on hostname resolution or on
+     * the IPv4/IPv6 preference of the host running the test. Completes the
+     * handshake and asserts SSLSession.getPeerHost() returns the expected
+     * peer host (which is derived from connectAddr's host label, not from
+     * the address the socket actually connected to).
+     */
+    private void connectAndCheckPeerHost(InetAddress connectAddr,
+        String expectedPeerHost) throws Exception {
+
+        int port;
+        InetSocketAddress addr;
+        SSLServerSocket ss = null;
+        SSLSocket cs = null;
+        SSLSocket server = null;
+        ExecutorService es = null;
+        Future<Void> serverFuture = null;
+
+        /* create new CTX */
+        this.ctx = tf.createSSLContext("TLS", ctxProvider);
+
+        try {
+            /* Bind the server explicitly to the loopback interface so the
+             * client connect() below targets exactly the address the server
+             * is listening on, avoiding IPv4/IPv6 mismatches. */
+            ss = (SSLServerSocket)ctx.getServerSocketFactory()
+                .createServerSocket(0, 0, InetAddress.getLoopbackAddress());
+
+            port = ss.getLocalPort();
+            addr = new InetSocketAddress(connectAddr, port);
+
+            /* Client uses createSocket() with no host/port, then connect()
+             * with the SocketAddress under test */
+            cs = (SSLSocket)ctx.getSocketFactory().createSocket();
+            cs.connect(addr);
+
+            server = (SSLSocket)ss.accept();
+            final SSLSocket finalServer = server;
+
+            es = Executors.newSingleThreadExecutor();
+            serverFuture = es.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    /* let a server-side handshake failure propagate into
+                     * the Future so it can be surfaced below instead of
+                     * being swallowed on the cleanup path */
+                    finalServer.startHandshake();
+                    finalServer.close();
+                    return null;
+                }
+            });
+
+            cs.startHandshake();
+
+            SSLSession cliSess = cs.getSession();
+            assertNotNull(cliSess);
+            assertEquals(expectedPeerHost, cliSess.getPeerHost());
+
+            /* surface any server-thread failure (wrapped in
+             * ExecutionException) rather than ignoring it in finally */
+            serverFuture.get(10, TimeUnit.SECONDS);
+
+        } catch (SSLHandshakeException e) {
+            fail("Unexpected handshake failure: " + e);
+
+        } finally {
+            closeHandshakeResources(cs, server, es, serverFuture, ss);
+        }
+    }
+
+    /**
+     * Test that SSLSocket.connect(SocketAddress) derives the peer host the
+     * same way SunJSSE does.
+     *
+     * createSocket() + connect(InetSocketAddress) must preserve the original
+     * hostname supplied by the application instead of replacing it with the
+     * resolved IP address. This test asserts on SSLSession.getPeerHost(),
+     * which is the value wolfJSSE feeds into SNI and HTTPS endpoint
+     * identification, so it is the directly verifiable proxy for that
+     * behavior. The end-to-end HTTPS endpoint-identification path itself is
+     * exercised by testConnectSocketAddressHttpsEndpointIdentification().
+     */
+    @Test
+    public void testConnectSocketAddressPreservesHostname() throws Exception {
+
+        /* Connection always targets the loopback interface the server binds
+         * to. Only the host label carried by the InetSocketAddress varies,
+         * which is what determines SSLSession.getPeerHost(). Use the bytes of
+         * the JVM's loopback address so the client and server agree on the
+         * address family (IPv4 vs IPv6) regardless of the host environment. */
+        byte[] loopback = InetAddress.getLoopbackAddress().getAddress();
+
+        /* InetSocketAddress built from an InetAddress that carries a hostname
+         * (as both new InetSocketAddress(String, int) and getByName() do):
+         * the original hostname is preserved, not replaced with the resolved
+         * IP address. getByAddress(host, addr) attaches the label without a
+         * DNS lookup, matching SunJSSE which keeps the original hostname. */
+        connectAndCheckPeerHost(
+            InetAddress.getByAddress("localhost", loopback), "localhost");
+
+        /* InetSocketAddress built from an InetAddress with no hostname (raw
+         * bytes): no hostname available, so the IP address is used, matching
+         * SunJSSE fallback to InetAddress.getHostAddress() */
+        InetAddress rawLoopback = InetAddress.getByAddress(loopback);
+        connectAndCheckPeerHost(rawLoopback, rawLoopback.getHostAddress());
+    }
+
+    /**
+     * Helper for testConnectSocketAddressHttpsEndpointIdentification().
+     *
+     * Connects a client SSLSocket (created with no host/port) to a local
+     * loopback server, attaching hostLabel as the InetSocketAddress host
+     * label without a DNS lookup so it becomes the peer host used for HTTPS
+     * endpoint identification. Enables "HTTPS" endpoint identification on the
+     * client, then asserts the client handshake succeeds when expectVerifyOk
+     * is true (hostLabel matches the server certificate) and fails with an
+     * SSLException otherwise.
+     */
+    private void connectHttpsAndCheckVerification(String hostLabel,
+        boolean expectVerifyOk) throws Exception {
+
+        byte[] loopback = InetAddress.getLoopbackAddress().getAddress();
+        InetAddress connectAddr =
+            InetAddress.getByAddress(hostLabel, loopback);
+
+        SSLServerSocket ss = null;
+        SSLSocket cs = null;
+        SSLSocket server = null;
+        ExecutorService es = null;
+        Future<Void> serverFuture = null;
+
+        /* create new CTX */
+        this.ctx = tf.createSSLContext("TLS", ctxProvider);
+
+        try {
+            /* Bind the server explicitly to the loopback interface so the
+             * client connect() below targets exactly the address the server
+             * is listening on, avoiding IPv4/IPv6 mismatches. */
+            ss = (SSLServerSocket)ctx.getServerSocketFactory()
+                .createServerSocket(0, 0, InetAddress.getLoopbackAddress());
+
+            cs = (SSLSocket)ctx.getSocketFactory().createSocket();
+            cs.connect(new InetSocketAddress(connectAddr, ss.getLocalPort()));
+
+            /* enable HTTPS endpoint identification (hostname verification),
+             * exactly as in the original bug report */
+            SSLParameters p = cs.getSSLParameters();
+            p.setEndpointIdentificationAlgorithm("HTTPS");
+            cs.setSSLParameters(p);
+
+            server = (SSLSocket)ss.accept();
+            final SSLSocket finalServer = server;
+
+            es = Executors.newSingleThreadExecutor();
+            serverFuture = es.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    /* The client aborts the handshake when verification
+                     * fails, so a server-side SSLException is expected in
+                     * the mismatch case and is not itself a test failure. */
+                    try {
+                        finalServer.startHandshake();
+                        finalServer.close();
+                    } catch (SSLException e) {
+                        /* expected when client rejects the server cert */
+                    }
+                    return null;
+                }
+            });
+
+            try {
+                cs.startHandshake();
+                if (!expectVerifyOk) {
+                    fail("Expected HTTPS endpoint identification to fail " +
+                        "for host label: " + hostLabel);
+                }
+
+                /* Success path: surface any unexpected server-thread failure
+                 * (wrapped in ExecutionException) rather than letting
+                 * closeHandshakeResources() swallow it on the cleanup path. */
+                serverFuture.get(10, TimeUnit.SECONDS);
+
+            } catch (SSLException e) {
+                if (expectVerifyOk) {
+                    fail("Unexpected handshake failure for host label " +
+                        hostLabel + ": " + e);
+                }
+            }
+
+        } finally {
+            closeHandshakeResources(cs, server, es, serverFuture, ss);
+        }
+    }
+
+    /**
+     * Test that SSLSocket.createSocket() + connect() preserves the original
+     * hostname so HTTPS endpoint identification (hostname verification) runs
+     * against that hostname rather than the resolved IP address.
+     *
+     * The example certificate (examples/provider/client.jks) carries
+     * SubjectAltName DNS:example.com and IP:127.0.0.1. Connecting with the
+     * "example.com" host label and "HTTPS" endpoint identification enabled
+     * must verify successfully, while a host label not present in the
+     * certificate must be rejected.
+     */
+    @Test
+    public void testConnectSocketAddressHttpsEndpointIdentification()
+        throws Exception {
+
+        /* Positive sanity check: host label matches the certificate SAN
+         * (DNS:example.com), so HTTPS endpoint identification succeeds. */
+        connectHttpsAndCheckVerification("example.com", true);
+
+        /* host label not present in the server certificate: HTTPS endpoint
+         * identification must fail. The loopback IP (127.0.0.1) would have
+         * matched the certificate IP SAN, so this subcase confirms the
+         * hostname, not the resolved IP, is what verification runs against. */
+        connectHttpsAndCheckVerification("wolfssl.invalid", false);
     }
 
     @Test
