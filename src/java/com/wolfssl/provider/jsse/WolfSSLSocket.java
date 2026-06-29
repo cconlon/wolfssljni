@@ -2303,12 +2303,13 @@ public class WolfSSLSocket extends SSLSocket {
         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
             () -> "Underlying Java Socket connected to peer: " + address);
 
-        /* register host/port for session resumption in case where
-           createSocket() was called without host/port, but
-           SSLSocket.connect() was explicitly called with SocketAddress */
+        /* Register host/port for session resumption, SNI, and endpoint
+           identification in the case where createSocket() was called
+           without host/port, but SSLSocket.connect() was explicitly called
+           with a SocketAddress. Use InetSocketAddress.getHostString() to
+           preserve original hostname without a reverse DNS lookup. */
         if (EngineHelper != null) {
-            EngineHelper.setHostAndPort(
-                address.getAddress().getHostAddress(),
+            EngineHelper.setHostAndPort(address.getHostString(),
                 address.getPort());
             EngineHelper.setPeerAddress(address.getAddress());
         }
