@@ -518,6 +518,51 @@ public class WolfSSLTest {
     }
 
     @Test
+    public void test_isECCNamedGroup() {
+
+        /* Classic ECC curves return true, spanning the low and high ends
+         * of the curve ID range (SECT, SECP, Brainpool, X25519/X448, SM2). */
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_SECT163K1));
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_SECP256R1));
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_SECP384R1));
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_SECP521R1));
+        assertTrue(WolfSSL.isECCNamedGroup(
+            WolfSSL.WOLFSSL_ECC_BRAINPOOLP512R1));
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_X25519));
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_X448));
+        assertTrue(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ECC_SM2P256V1));
+
+        /* The whole registry range below the FFDHE block classifies as
+         * ECC (RFC 7919 partition), including IANA-assigned curve IDs
+         * without WOLFSSL_ECC_* constants yet: 31 is
+         * brainpoolP256r1tls13 (RFC 8734), 34 is GC256A (RFC 9189), and
+         * 255 is the top of the elliptic curve range. */
+        assertTrue(WolfSSL.isECCNamedGroup(31));
+        assertTrue(WolfSSL.isECCNamedGroup(34));
+        assertTrue(WolfSSL.isECCNamedGroup(255));
+
+        /* FFDHE groups and the reserved FFDHE block (256-511) return
+         * false. */
+        assertFalse(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_FFDHE_2048));
+        assertFalse(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_FFDHE_8192));
+        assertFalse(WolfSSL.isECCNamedGroup(511));
+
+        /* PQC standalone and hybrid groups return false, including
+         * hybrids with an ECDHE component. */
+        assertFalse(WolfSSL.isECCNamedGroup(WolfSSL.WOLFSSL_ML_KEM_768));
+        assertFalse(WolfSSL.isECCNamedGroup(
+            WolfSSL.WOLFSSL_X25519MLKEM768));
+        assertFalse(WolfSSL.isECCNamedGroup(
+            WolfSSL.WOLFSSL_SECP256R1MLKEM768));
+
+        /* Sentinel and out-of-range integers return false. */
+        assertFalse(WolfSSL.isECCNamedGroup(
+            WolfSSL.WOLFSSL_NAMED_GROUP_INVALID));
+        assertFalse(WolfSSL.isECCNamedGroup(0));
+        assertFalse(WolfSSL.isECCNamedGroup(-1));
+    }
+
+    @Test
     public void test_PQC_FeatureDetect_NativeReturns() {
 
         /* Each native call should be reachable and return a boolean
