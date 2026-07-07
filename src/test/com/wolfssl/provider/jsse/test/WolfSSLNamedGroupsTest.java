@@ -22,13 +22,17 @@
 package com.wolfssl.provider.jsse.test;
 
 import com.wolfssl.WolfSSL;
+import com.wolfssl.WolfSSLContext;
 import com.wolfssl.WolfSSLException;
+import com.wolfssl.WolfSSLSession;
 import com.wolfssl.provider.jsse.WolfSSLParametersHelper;
 import com.wolfssl.provider.jsse.WolfSSLProvider;
 import com.wolfssl.test.TimedTestWatcher;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.security.NoSuchProviderException;
 import java.security.Security;
+import java.security.cert.Certificate;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLParameters;
@@ -41,6 +45,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Tests for TLS named-groups (supported_groups) configuration in wolfJSSE.
@@ -340,6 +345,400 @@ public class WolfSSLNamedGroupsTest {
                     new String[] { "TLSv1.3" }, APP_DATA);
                 assertEquals("jdk.tls.namedGroups alone should drive a " +
                     "successful PQC handshake", 0, ret);
+            }
+            finally {
+                WolfSSLPQCTestUtil.restoreCurvesProperty(prevWolf);
+                WolfSSLPQCTestUtil.restoreJdkNamedGroupsProperty(prevJdk);
+            }
+        }
+    }
+
+    /**
+     * A server whose KeyStore holds both RSA and ECC private keys must
+     * complete a TLS 1.2 handshake when jdk.tls.namedGroups is restricted
+     * to FFDHE groups only.
+     *
+     * Server certificate selection prefers an ECC alias over RSA when the
+     * KeyStore holds both. With no ECC curves in supported_groups, ECDHE
+     * suites cannot be negotiated on TLS 1.2, so an ECDSA certificate
+     * cannot complete any key exchange and the handshake previously failed
+     * with no shared cipher suite. The RSA alias must be preferred instead
+     * so a DHE_RSA suite can complete over the RFC 7919 group.
+     */
+    @Test
+    public void testJdkTlsNamedGroupsFfdheOnlyTls12PrefersRsaCert()
+        throws Exception {
+
+        Assume.assumeTrue("TLS 1.2, RSA and ECC required in native wolfSSL",
+            WolfSSL.TLSv12Enabled() && WolfSSL.RsaEnabled() &&
+            WolfSSL.EccEnabled());
+        Assume.assumeTrue("DHE_RSA cipher suites not available",
+            dheRsaSuitesAvailable());
+        Assume.assumeTrue("ffdhe2048 named group not supported",
+            ffdhe2048GroupSupported());
+
+        synchronized (WolfSSLPQCTestUtil.GROUP_PROP_LOCK) {
+            Assume.assumeTrue("TLS 1.2 FFDHE handshakes not supported by " +
+                "native wolfSSL build", tls12FfdheHandshakeSupported());
+
+            String prevWolf =
+                WolfSSLPQCTestUtil.setCurvesProperty(null);
+            String prevJdk =
+                WolfSSLPQCTestUtil.setJdkNamedGroupsProperty("ffdhe2048");
+
+            try {
+                SSLContext ctx = tf.createSSLContext("TLSv1.2", PROVIDER);
+                SSLEngine server = ctx.createSSLEngine();
+                server.setUseClientMode(false);
+                server.setNeedClientAuth(false);
+                SSLEngine client =
+                    ctx.createSSLEngine("wolfSSL named groups test", 11111);
+                client.setUseClientMode(true);
+
+                int ret = tf.testConnection(server, client,
+                    suitesMatching("TLS_DHE_RSA_"),
+                    new String[] { "TLSv1.2" }, APP_DATA);
+                assertEquals("TLS 1.2 handshake with FFDHE-only " +
+                    "jdk.tls.namedGroups and a KeyStore holding both RSA " +
+                    "and ECC keys must succeed", 0, ret);
+
+                String suite = client.getSession().getCipherSuite();
+                assertTrue("negotiated cipher suite must be DHE_RSA, " +
+                    "got: " + suite, suite.startsWith("TLS_DHE_RSA_") ||
+                    suite.startsWith("DHE-RSA-"));
+            }
+            finally {
+                WolfSSLPQCTestUtil.restoreCurvesProperty(prevWolf);
+                WolfSSLPQCTestUtil.restoreJdkNamedGroupsProperty(prevJdk);
+            }
+        }
+    }
+
+    /**
+     * True when native wolfSSL was compiled with DH support, using the
+     * presence of DHE_RSA cipher suites as a proxy. FFDHE named groups
+     * need DH for both TLS 1.2 DHE_RSA suites and TLS 1.3 FFDHE key
+     * shares.
+     */
+    private static boolean dheRsaSuitesAvailable() {
+        for (String suite : WolfSSL.getCiphersIana()) {
+            if (suite.startsWith("TLS_DHE_RSA_")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Return compiled-in cipher suites whose IANA names start with any of
+     * the given prefixes.
+     */
+    private static String[] suitesMatching(String... prefixes) {
+
+        ArrayList<String> matched = new ArrayList<>();
+
+        for (String suite : WolfSSL.getCiphersIana()) {
+            for (String prefix : prefixes) {
+                if (suite.startsWith(prefix)) {
+                    matched.add(suite);
+                    break;
+                }
+            }
+        }
+
+        return matched.toArray(new String[matched.size()]);
+    }
+
+    /* Cached result of tls12FfdheHandshakeSupported() */
+    private static Boolean tls12FfdheCapable = null;
+
+    /**
+     * True when this environment can complete a TLS 1.2 handshake with
+     * FFDHE-only named groups at all, probed with an RSA-only server
+     * KeyStore so that certificate selection plays no part.
+     *
+     * Caller must hold WolfSSLPQCTestUtil.GROUP_PROP_LOCK.
+     */
+    private static boolean tls12FfdheHandshakeSupported() throws Exception {
+
+        if (tls12FfdheCapable != null) {
+            return tls12FfdheCapable.booleanValue();
+        }
+
+        String prevJdk =
+            WolfSSLPQCTestUtil.setJdkNamedGroupsProperty("ffdhe2048");
+
+        try {
+            SSLContext srvCtx = tf.createSSLContext("TLSv1.2", PROVIDER,
+                tf.createTrustManager("SunX509", tf.caClientJKS, PROVIDER),
+                tf.createKeyManager("SunX509", tf.serverRSAJKS, PROVIDER));
+            SSLContext cliCtx = tf.createSSLContext("TLSv1.2", PROVIDER,
+                tf.createTrustManager("SunX509", tf.caServerJKS, PROVIDER),
+                tf.createKeyManager("SunX509", tf.clientRSAJKS, PROVIDER));
+
+            SSLEngine server = srvCtx.createSSLEngine();
+            server.setUseClientMode(false);
+            server.setNeedClientAuth(false);
+            SSLEngine client =
+                cliCtx.createSSLEngine("wolfSSL named groups test", 11111);
+            client.setUseClientMode(true);
+
+            int ret = tf.testConnection(server, client,
+                suitesMatching("TLS_DHE_RSA_"),
+                new String[] { "TLSv1.2" }, APP_DATA);
+            tls12FfdheCapable = Boolean.valueOf(ret == 0);
+        }
+        finally {
+            WolfSSLPQCTestUtil.restoreJdkNamedGroupsProperty(prevJdk);
+        }
+
+        return tls12FfdheCapable.booleanValue();
+    }
+
+    /**
+     * True when native wolfSSL supports the ffdhe2048 TLS named group
+     * (HAVE_FFDHE_2048), probed the same way wolfJSSE applies configured
+     * groups to a session.
+     */
+    private static boolean ffdhe2048GroupSupported() {
+
+        WolfSSLContext ctx = null;
+        WolfSSLSession ssl = null;
+
+        try {
+            ctx = new WolfSSLContext(WolfSSL.SSLv23_ClientMethod());
+            ssl = new WolfSSLSession(ctx);
+
+            return (ssl.useSupportedCurves(
+                new int[] { WolfSSL.WOLFSSL_FFDHE_2048 }) ==
+                WolfSSL.SSL_SUCCESS);
+        } catch (Exception e) {
+            return false;
+        } finally {
+            /* Best-effort cleanup, must not throw out of this probe */
+            if (ssl != null) {
+                try {
+                    ssl.freeSSL();
+                } catch (Exception e) {
+                    /* ignore */
+                }
+            }
+            if (ctx != null) {
+                try {
+                    ctx.free();
+                } catch (Exception e) {
+                    /* ignore */
+                }
+            }
+        }
+    }
+
+    /**
+     * Same server RSA-alias preference as
+     * testJdkTlsNamedGroupsFfdheOnlyTls12PrefersRsaCert, driven by the
+     * lowest-precedence configuration source, the
+     * wolfjsse.enabledSupportedCurves Security property.
+     */
+    @Test
+    public void testWolfjsseCurvesPropertyFfdheOnlyTls12PrefersRsaCert()
+        throws Exception {
+
+        Assume.assumeTrue("TLS 1.2, RSA and ECC required in native wolfSSL",
+            WolfSSL.TLSv12Enabled() && WolfSSL.RsaEnabled() &&
+            WolfSSL.EccEnabled());
+        Assume.assumeTrue("DHE_RSA cipher suites not available",
+            dheRsaSuitesAvailable());
+        Assume.assumeTrue("ffdhe2048 named group not supported",
+            ffdhe2048GroupSupported());
+
+        synchronized (WolfSSLPQCTestUtil.GROUP_PROP_LOCK) {
+            Assume.assumeTrue("TLS 1.2 FFDHE handshakes not supported by " +
+                "native wolfSSL build", tls12FfdheHandshakeSupported());
+
+            String prevJdk =
+                WolfSSLPQCTestUtil.setJdkNamedGroupsProperty(null);
+            String prevWolf =
+                WolfSSLPQCTestUtil.setCurvesProperty("ffdhe2048");
+
+            try {
+                SSLContext ctx = tf.createSSLContext("TLSv1.2", PROVIDER);
+                SSLEngine server = ctx.createSSLEngine();
+                server.setUseClientMode(false);
+                server.setNeedClientAuth(false);
+                SSLEngine client =
+                    ctx.createSSLEngine("wolfSSL named groups test", 11111);
+                client.setUseClientMode(true);
+
+                int ret = tf.testConnection(server, client,
+                    suitesMatching("TLS_DHE_RSA_"),
+                    new String[] { "TLSv1.2" }, APP_DATA);
+                assertEquals("TLS 1.2 handshake with FFDHE-only " +
+                    "wolfjsse.enabledSupportedCurves and a KeyStore " +
+                    "holding both RSA and ECC keys must succeed", 0, ret);
+
+                String suite = client.getSession().getCipherSuite();
+                assertTrue("negotiated cipher suite must be DHE_RSA, " +
+                    "got: " + suite, suite.startsWith("TLS_DHE_RSA_") ||
+                    suite.startsWith("DHE-RSA-"));
+            }
+            finally {
+                WolfSSLPQCTestUtil.restoreCurvesProperty(prevWolf);
+                WolfSSLPQCTestUtil.restoreJdkNamedGroupsProperty(prevJdk);
+            }
+        }
+    }
+
+    /**
+     * Same server RSA-alias preference as
+     * testJdkTlsNamedGroupsFfdheOnlyTls12PrefersRsaCert, driven by the
+     * highest-precedence configuration source, per-engine
+     * SSLParameters.setNamedGroups() (JDK 20+).
+     */
+    @Test
+    public void testSetNamedGroupsFfdheOnlyTls12PrefersRsaCert()
+        throws Exception {
+
+        Assume.assumeTrue("Host JDK lacks SSLParameters.setNamedGroups",
+            jdkHasNamedGroups);
+        Assume.assumeTrue("TLS 1.2, RSA and ECC required in native wolfSSL",
+            WolfSSL.TLSv12Enabled() && WolfSSL.RsaEnabled() &&
+            WolfSSL.EccEnabled());
+        Assume.assumeTrue("DHE_RSA cipher suites not available",
+            dheRsaSuitesAvailable());
+        Assume.assumeTrue("ffdhe2048 named group not supported",
+            ffdhe2048GroupSupported());
+
+        synchronized (WolfSSLPQCTestUtil.GROUP_PROP_LOCK) {
+            Assume.assumeTrue("TLS 1.2 FFDHE handshakes not supported by " +
+                "native wolfSSL build", tls12FfdheHandshakeSupported());
+
+            String prevWolf =
+                WolfSSLPQCTestUtil.setCurvesProperty(null);
+            String prevJdk =
+                WolfSSLPQCTestUtil.setJdkNamedGroupsProperty(null);
+
+            try {
+                SSLContext ctx = tf.createSSLContext("TLSv1.2", PROVIDER);
+                SSLEngine server = ctx.createSSLEngine();
+                server.setUseClientMode(false);
+                server.setNeedClientAuth(false);
+                SSLEngine client =
+                    ctx.createSSLEngine("wolfSSL named groups test", 11111);
+                client.setUseClientMode(true);
+
+                setEngineNamedGroups(server, new String[] { "ffdhe2048" });
+                setEngineNamedGroups(client, new String[] { "ffdhe2048" });
+
+                int ret = tf.testConnection(server, client,
+                    suitesMatching("TLS_DHE_RSA_"),
+                    new String[] { "TLSv1.2" }, APP_DATA);
+                assertEquals("TLS 1.2 handshake with FFDHE-only " +
+                    "SSLParameters.setNamedGroups() and a KeyStore " +
+                    "holding both RSA and ECC keys must succeed", 0, ret);
+
+                String suite = client.getSession().getCipherSuite();
+                assertTrue("negotiated cipher suite must be DHE_RSA, " +
+                    "got: " + suite, suite.startsWith("TLS_DHE_RSA_") ||
+                    suite.startsWith("DHE-RSA-"));
+            }
+            finally {
+                WolfSSLPQCTestUtil.restoreCurvesProperty(prevWolf);
+                WolfSSLPQCTestUtil.restoreJdkNamedGroupsProperty(prevJdk);
+            }
+        }
+    }
+
+    /**
+     * On a TLS 1.3-only session, FFDHE-only named groups must not change
+     * server certificate selection: TLS 1.3 negotiates the key exchange
+     * group independently of the certificate type, so the default ECC
+     * alias preference stays and the handshake completes with the ECDSA
+     * certificate over an ffdhe2048 key share.
+     */
+    @Test
+    public void testJdkTlsNamedGroupsFfdheOnlyTls13KeepsEccCert()
+        throws Exception {
+
+        Assume.assumeTrue("TLS 1.3, RSA and ECC required in native wolfSSL",
+            WolfSSL.TLSv13Enabled() && WolfSSL.RsaEnabled() &&
+            WolfSSL.EccEnabled());
+        Assume.assumeTrue("ffdhe2048 named group not supported",
+            ffdhe2048GroupSupported());
+
+        synchronized (WolfSSLPQCTestUtil.GROUP_PROP_LOCK) {
+            String prevWolf =
+                WolfSSLPQCTestUtil.setCurvesProperty(null);
+            String prevJdk =
+                WolfSSLPQCTestUtil.setJdkNamedGroupsProperty("ffdhe2048");
+
+            try {
+                SSLContext ctx = tf.createSSLContext("TLSv1.3", PROVIDER);
+                SSLEngine server = ctx.createSSLEngine();
+                server.setUseClientMode(false);
+                server.setNeedClientAuth(false);
+                SSLEngine client =
+                    ctx.createSSLEngine("wolfSSL named groups test", 11111);
+                client.setUseClientMode(true);
+
+                int ret = tf.testConnection(server, client, null,
+                    new String[] { "TLSv1.3" }, APP_DATA);
+                assertEquals("TLS 1.3 handshake with FFDHE-only " +
+                    "jdk.tls.namedGroups must succeed", 0, ret);
+
+                Certificate[] peerCerts =
+                    client.getSession().getPeerCertificates();
+                String keyAlgo = peerCerts[0].getPublicKey().getAlgorithm();
+                assertEquals("TLS 1.3 server must keep default ECC cert " +
+                    "preference with FFDHE-only named groups", "EC",
+                    keyAlgo);
+            }
+            finally {
+                WolfSSLPQCTestUtil.restoreCurvesProperty(prevWolf);
+                WolfSSLPQCTestUtil.restoreJdkNamedGroupsProperty(prevJdk);
+            }
+        }
+    }
+
+    /**
+     * When the configured named groups contain at least one ECC curve
+     * alongside FFDHE groups, server certificate selection must keep the
+     * default ECC preference and negotiate an ECDHE_ECDSA suite on
+     * TLS 1.2.
+     */
+    @Test
+    public void testJdkTlsNamedGroupsMixedEccFfdheTls12KeepsEccCert()
+        throws Exception {
+
+        Assume.assumeTrue("TLS 1.2, RSA and ECC required in native wolfSSL",
+            WolfSSL.TLSv12Enabled() && WolfSSL.RsaEnabled() &&
+            WolfSSL.EccEnabled());
+
+        synchronized (WolfSSLPQCTestUtil.GROUP_PROP_LOCK) {
+            String prevWolf =
+                WolfSSLPQCTestUtil.setCurvesProperty(null);
+            String prevJdk = WolfSSLPQCTestUtil.setJdkNamedGroupsProperty(
+                "secp256r1,ffdhe2048");
+
+            try {
+                SSLContext ctx = tf.createSSLContext("TLSv1.2", PROVIDER);
+                SSLEngine server = ctx.createSSLEngine();
+                server.setUseClientMode(false);
+                server.setNeedClientAuth(false);
+                SSLEngine client =
+                    ctx.createSSLEngine("wolfSSL named groups test", 11111);
+                client.setUseClientMode(true);
+
+                int ret = tf.testConnection(server, client,
+                    suitesMatching("TLS_ECDHE_ECDSA_", "TLS_DHE_RSA_"),
+                    new String[] { "TLSv1.2" }, APP_DATA);
+                assertEquals("TLS 1.2 handshake with mixed ECC+FFDHE " +
+                    "jdk.tls.namedGroups must succeed", 0, ret);
+
+                String suite = client.getSession().getCipherSuite();
+                assertTrue("negotiated cipher suite must be ECDHE_ECDSA " +
+                    "when an ECC group is configured, got: " + suite,
+                    suite.startsWith("TLS_ECDHE_ECDSA_") ||
+                    suite.startsWith("ECDHE-ECDSA-"));
             }
             finally {
                 WolfSSLPQCTestUtil.restoreCurvesProperty(prevWolf);

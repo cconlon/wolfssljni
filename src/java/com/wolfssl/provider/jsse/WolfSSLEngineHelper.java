@@ -291,6 +291,20 @@ public class WolfSSLEngineHelper {
             keyAlgos.add("ML-DSA-87");
         }
 
+        /* On server side, only prefer an ECC alias when an ECDSA certificate
+         * can actually complete a key exchange for this session. When the
+         * TLS named groups have been explicitly restricted to a list with
+         * no ECC curves (ex: FFDHE groups only via jdk.tls.namedGroups),
+         * ECDHE/ECDH cipher suites cannot be negotiated. */
+        if (!clientMode && keyAlgos.contains("EC") &&
+            !eccCertUsableWithNamedGroups()) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                () -> "no ECC named groups configured for session, " +
+                "preferring non-ECC server cert/key types");
+            keyAlgos.remove("EC");
+            keyAlgos.add("EC");
+        }
+
         String[] keyTypes = new String[keyAlgos.size()];
         keyTypes = keyAlgos.toArray(keyTypes);
 
@@ -336,6 +350,58 @@ public class WolfSSLEngineHelper {
         }
 
         return alias;
+    }
+
+    /**
+     * Return true if an ECDSA certificate is usable for key exchange on
+     * this session, given the configured TLS named groups and the
+     * SSLContext protocol version.
+     *
+     * Reads the named-groups configuration with the same source precedence
+     * as setLocalSupportedGroups(): SSLParameters.setNamedGroups(), then
+     * jdk.tls.namedGroups System property, then the
+     * wolfjsse.enabledSupportedCurves Security property.
+     *
+     * Returns true when no source is configured (native default groups
+     * include ECC curves), when the configured list contains at least one
+     * classic ECC curve, or when the SSLContext is (D)TLS 1.3-only, since
+     * TLS 1.3 certificate authentication is independent of the negotiated
+     * key exchange group.
+     */
+    private boolean eccCertUsableWithNamedGroups() {
+
+        String[] groups =
+            WolfSSLParametersHelper.getNamedGroupsFromParams(this.params);
+
+        if (groups == null) {
+            groups = WolfSSLUtil.getJdkTlsNamedGroups();
+        }
+
+        if (groups == null) {
+            groups = WolfSSLUtil.getSupportedCurves();
+        }
+
+        if (groups == null) {
+            return true;
+        }
+
+        for (String name : groups) {
+            if (WolfSSL.isECCNamedGroup(
+                WolfSSL.getNamedGroupFromString(name))) {
+                return true;
+            }
+        }
+
+        /* No ECC curves configured. ECDHE/ECDH cannot complete on
+         * (D)TLS <= 1.2, but TLS 1.3 does not tie cert type to the group.
+         * Use the context protocol version, not the enabled protocols
+         * list: cert selection can run before the app finishes configuring
+         * the session (ex: SSLEngine.getSession() loads the cert), while
+         * a (D)TLS 1.3-only context can never negotiate lower. */
+        WolfSSL.TLS_VERSION ctxVersion =
+            this.authStore.getProtocolVersion();
+        return (ctxVersion == WolfSSL.TLS_VERSION.TLSv1_3 ||
+                ctxVersion == WolfSSL.TLS_VERSION.DTLSv1_3);
     }
 
     /**

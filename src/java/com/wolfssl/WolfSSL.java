@@ -2189,6 +2189,32 @@ public class WolfSSL {
         return PQC_GROUP_IDS.contains(Integer.valueOf(namedGroup));
     }
 
+    /**
+     * Returns true if the given native named-group enum value identifies a
+     * classic elliptic curve group (SECT/SECP/Brainpool/X25519/X448/SM2),
+     * as opposed to an FFDHE or post-quantum group.
+     *
+     * The classification follows the IANA TLS Supported Groups registry
+     * partition (RFC 7919). Every value in the range 1-255 is treated as
+     * an elliptic curve group, including IANA-assigned curve IDs that do
+     * not yet have WOLFSSL_ECC_* constants on this class (ex:
+     * brainpoolP256r1tls13 through brainpoolP512r1tls13 at 31-33, GOST
+     * curves at 34-40). Values 256-511 are the FFDHE block and PQC
+     * standalone/hybrid groups sit at 512 and above, all returning false.
+     *
+     * @param namedGroup native named-group enum value, typically the
+     *                   result of {@link #getNamedGroupFromString(String)}
+     *                   or one of the WOLFSSL_ECC_* constants on this class.
+     * @return true if the group is in the elliptic curve range of the
+     *         supported groups registry, false otherwise (including for
+     *         {@link #WOLFSSL_NAMED_GROUP_INVALID}, FFDHE groups, and
+     *         PQC standalone/hybrid groups).
+     */
+    public static boolean isECCNamedGroup(int namedGroup) {
+        return (namedGroup > WOLFSSL_NAMED_GROUP_INVALID &&
+                namedGroup < WOLFSSL_FFDHE_2048);
+    }
+
     @SuppressWarnings({"deprecation", "removal"})
     @Override
     protected void finalize() throws Throwable
