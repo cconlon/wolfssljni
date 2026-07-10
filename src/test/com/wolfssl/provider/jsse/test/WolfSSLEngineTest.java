@@ -2793,6 +2793,225 @@ public class WolfSSLEngineTest {
     }
 
     @Test
+    public void testCloseOutboundWithPendingAppData()
+        throws NoSuchProviderException, NoSuchAlgorithmException,
+               KeyManagementException, KeyStoreException, CertificateException,
+               IOException, UnrecoverableKeyException {
+
+        /* After an app calls closeOutbound() on a SSLEngine, unwrap() must
+         * continue to deliver incoming peer application data to the app and
+         * process the peer's close_notify alert so inbound closes. Native
+         * wolfSSL_shutdown() will not process incoming records while
+         * decrypted application data is still buffered internally, so unwrap()
+         * needs to drain application data itself instead of relying on
+         * wolfSSL_shutdown() to consume incoming records. Mirrors the close
+         * sequence of the SunJSSE interop test SSLEngine/NoAuthClientAuth.java,
+         * which spins forever on wrap()/unwrap() if the peer's close_notify is
+         * never processed. */
+
+        for (int i = 0; i < enabledProtocols.size(); i++) {
+
+            /* Skip DTLS, testing in-order TLS close sequence here */
+            if (enabledProtocols.get(i).startsWith("DTLS")) {
+                continue;
+            }
+
+            this.ctx = tf.createSSLContext(
+                enabledProtocols.get(i), engineProvider);
+
+            SSLEngine server = this.ctx.createSSLEngine();
+            SSLEngine client = this.ctx.createSSLEngine(
+                "wolfSSL close pending data test", 11111);
+
+            server.setUseClientMode(false);
+            server.setNeedClientAuth(false);
+            client.setUseClientMode(true);
+
+            int ret = tf.testConnection(server, client, null, null,
+                "close pending data test");
+            if (ret != 0) {
+                fail("failed to create connection: " +
+                    enabledProtocols.get(i));
+            }
+
+            String msg = "client data sent after server closeOutbound";
+            ByteBuffer clientOut = ByteBuffer.wrap(msg.getBytes());
+            ByteBuffer empty = ByteBuffer.allocate(0);
+            ByteBuffer cliToSer = ByteBuffer.allocateDirect(
+                client.getSession().getPacketBufferSize());
+            ByteBuffer serToCli = ByteBuffer.allocateDirect(
+                server.getSession().getPacketBufferSize());
+            ByteBuffer serPlain = ByteBuffer.allocate(
+                server.getSession().getApplicationBufferSize());
+            ByteBuffer cliPlain = ByteBuffer.allocate(
+                client.getSession().getApplicationBufferSize());
+
+            /* Server closes outbound while client app data is still in flight.
+             * Drive both engines like an app would until both report closed,
+             * bounded by maxLoops to catch a close seq that never completes. */
+            server.closeOutbound();
+
+            int loops = 0;
+            int maxLoops = 20;
+            while ((!server.isInboundDone() || !server.isOutboundDone() ||
+                    !client.isInboundDone() || !client.isOutboundDone()) &&
+                   (loops++ < maxLoops)) {
+
+                client.wrap(clientOut, cliToSer);
+                server.wrap(empty, serToCli);
+
+                cliToSer.flip();
+                serToCli.flip();
+
+                if (!client.isInboundDone()) {
+                    client.unwrap(serToCli, cliPlain);
+                }
+                if (!server.isInboundDone()) {
+                    server.unwrap(cliToSer, serPlain);
+                }
+
+                cliToSer.compact();
+                serToCli.compact();
+            }
+
+            if (!server.isInboundDone() || !server.isOutboundDone() ||
+                !client.isInboundDone() || !client.isOutboundDone()) {
+                fail("SSLEngines failed to close within " + maxLoops +
+                    " wrap/unwrap iterations after closeOutbound(), " +
+                    "peer close_notify possibly not processed: " +
+                    enabledProtocols.get(i));
+            }
+
+            /* Application data sent by peer after local closeOutbound()
+             * must be delivered by unwrap(), not discarded */
+            serPlain.flip();
+            byte[] received = new byte[serPlain.remaining()];
+            serPlain.get(received);
+            assertEquals("server did not receive application data sent " +
+                "by client during connection close: " +
+                enabledProtocols.get(i), msg, new String(received));
+        }
+    }
+
+    /**
+     * unwrap() called after closeOutbound() with an output buffer too
+     * small for pending peer app data must return BUFFER_OVERFLOW so app
+     * knows to enlarge its buffer. Data must then be delivered when
+     * unwrap() is called again with a large enough buffer.
+     */
+    @Test
+    public void testCloseOutboundUnwrapBufferOverflow()
+        throws NoSuchProviderException, NoSuchAlgorithmException,
+               KeyManagementException, KeyStoreException, CertificateException,
+               IOException, UnrecoverableKeyException {
+
+        for (int i = 0; i < enabledProtocols.size(); i++) {
+
+            /* Skip DTLS, testing in-order TLS close sequence here */
+            if (enabledProtocols.get(i).startsWith("DTLS")) {
+                continue;
+            }
+
+            this.ctx = tf.createSSLContext(enabledProtocols.get(i),
+                engineProvider);
+
+            SSLEngine server = this.ctx.createSSLEngine();
+            SSLEngine client = this.ctx.createSSLEngine(
+                "wolfSSL close overflow test", 11111);
+
+            server.setUseClientMode(false);
+            server.setNeedClientAuth(false);
+            client.setUseClientMode(true);
+
+            int ret = tf.testConnection(server, client, null, null,
+                "close overflow test");
+            if (ret != 0) {
+                fail("failed to create connection: " + enabledProtocols.get(i));
+            }
+
+            String msg = "client data sent after server closeOutbound";
+            ByteBuffer clientOut = ByteBuffer.wrap(msg.getBytes());
+            ByteBuffer empty = ByteBuffer.allocate(0);
+            ByteBuffer cliToSer = ByteBuffer.allocateDirect(
+                client.getSession().getPacketBufferSize());
+            ByteBuffer serToCli = ByteBuffer.allocateDirect(
+                server.getSession().getPacketBufferSize());
+            ByteBuffer tooSmall = ByteBuffer.allocate(1);
+            ByteBuffer serPlain = ByteBuffer.allocate(
+                server.getSession().getApplicationBufferSize());
+            ByteBuffer cliPlain = ByteBuffer.allocate(
+                client.getSession().getApplicationBufferSize());
+
+            server.closeOutbound();
+
+            /* Client sends application data after server closed outbound */
+            SSLEngineResult result = client.wrap(clientOut, cliToSer);
+            if (result.bytesConsumed() != msg.getBytes().length) {
+                fail("client wrap() did not consume all application data: " +
+                    enabledProtocols.get(i));
+            }
+            cliToSer.flip();
+
+            /* unwrap() with too small output buffer must return
+             * BUFFER_OVERFLOW, CLOSED would mask the need to enlarge the
+             * output buffer and pending data would never be delivered */
+            result = server.unwrap(cliToSer, tooSmall);
+            if (result.getStatus() != SSLEngineResult.Status.BUFFER_OVERFLOW) {
+                fail("unwrap() with too small output buffer should return " +
+                    "BUFFER_OVERFLOW, got " + result.getStatus() + ": " +
+                    enabledProtocols.get(i));
+            }
+            if (result.bytesProduced() != 0) {
+                fail("unwrap() returning BUFFER_OVERFLOW should not " +
+                    "produce data: " + enabledProtocols.get(i));
+            }
+
+            /* unwrap() again with large enough output buffer must deliver
+             * the pending application data */
+            result = server.unwrap(cliToSer, serPlain);
+            serPlain.flip();
+            byte[] received = new byte[serPlain.remaining()];
+            serPlain.get(received);
+            assertEquals("server did not receive application data after " +
+                "BUFFER_OVERFLOW retry: " + enabledProtocols.get(i),
+                msg, new String(received));
+            serPlain.clear();
+            cliToSer.compact();
+
+            /* Finish close sequence, both engines should close cleanly */
+            int loops = 0;
+            int maxLoops = 20;
+            while ((!server.isInboundDone() || !server.isOutboundDone() ||
+                    !client.isInboundDone() || !client.isOutboundDone()) &&
+                   (loops++ < maxLoops)) {
+
+                client.wrap(clientOut, cliToSer);
+                server.wrap(empty, serToCli);
+
+                cliToSer.flip();
+                serToCli.flip();
+
+                if (!client.isInboundDone()) {
+                    client.unwrap(serToCli, cliPlain);
+                }
+                if (!server.isInboundDone()) {
+                    server.unwrap(cliToSer, serPlain);
+                }
+
+                cliToSer.compact();
+                serToCli.compact();
+            }
+
+            if (!server.isInboundDone() || !server.isOutboundDone() ||
+                !client.isInboundDone() || !client.isOutboundDone()) {
+                fail("SSLEngines failed to close within " + maxLoops +
+                    " wrap/unwrap iterations after closeOutbound(): " +
+                    enabledProtocols.get(i));
+            }
+        }
+    }
+
+    @Test
     public void testBufferUnderflowPartialRecord()
         throws NoSuchProviderException, NoSuchAlgorithmException,
                KeyManagementException, KeyStoreException,

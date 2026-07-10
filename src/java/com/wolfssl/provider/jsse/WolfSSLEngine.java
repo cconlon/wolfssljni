@@ -1528,7 +1528,14 @@ public class WolfSSLEngine extends SSLEngine {
                     checkAndInitSSLEngine();
                 }
 
-                if (outBoundOpen == false) {
+                /* Only route unwrap() into ClosingConnection() if inbound side
+                 * is already closed or the handshake not finished. If outbound
+                 * has been closed but inbound is still open, fall through to
+                 * normal receive path which delivers buffered/incoming app
+                 * data to app and processes the peer's incoming close_notify
+                 * alert via RecvAppData(). */
+                if (outBoundOpen == false &&
+                    (inBoundOpen == false || !this.handshakeFinished)) {
                     try {
                         if (ClosingConnection() == WolfSSL.SSL_SUCCESS) {
                             /* Mark SSLEngine status as CLOSED */
@@ -1708,8 +1715,14 @@ public class WolfSSLEngine extends SSLEngine {
                         }
                     } /* end DoHandshake() / RecvAppData() */
 
-                    if (outBoundOpen == false || this.closeNotifySent ||
-                        this.closeNotifyReceived) {
+                    /* Mark status CLOSED when closing down, but do not
+                     * overwrite BUFFER_OVERFLOW/BUFFER_UNDERFLOW. App needs
+                     * those to enlarge the output buffer or provide more input
+                     * data, otherwise pending app data may not be delivered. */
+                    if ((outBoundOpen == false || this.closeNotifySent ||
+                         this.closeNotifyReceived) &&
+                        (status != SSLEngineResult.Status.BUFFER_OVERFLOW) &&
+                        (status != SSLEngineResult.Status.BUFFER_UNDERFLOW)) {
                         /* Mark SSLEngine status as CLOSED */
                         status = SSLEngineResult.Status.CLOSED;
                         /* Handshake has finished and SSLEngine is closed,
