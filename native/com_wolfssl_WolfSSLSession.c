@@ -1782,6 +1782,20 @@ void NativeWolfSSLSessionCleanup(JNIEnv* jenv)
 #endif
 }
 
+#if defined(HAVE_PK_CALLBACKS) && (defined(HAVE_ECC) || !defined(NO_RSA))
+/* Frees internCtx and its active global reference.
+ * Shared by setPkCtxHelper() and freeSSL(). */
+static void freePkCtx(JNIEnv* jenv, internCtx* ctx)
+{
+    if (ctx != NULL) {
+        if (ctx->active == 1 && ctx->obj != NULL) {
+            (*jenv)->DeleteGlobalRef(jenv, ctx->obj);
+        }
+        XFREE(ctx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    }
+}
+#endif
+
 JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_freeSSL
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
@@ -1792,9 +1806,6 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_freeSSL
     wolfSSL_Mutex* sessLock = NULL;
     byte lockAvailable = 1;
     (void)jcl;
-#if defined(HAVE_PK_CALLBACKS) && (defined(HAVE_ECC) || !defined(NO_RSA))
-    internCtx* pkCtx = NULL;
-#endif
 
     if (ssl == NULL) {
         throwWolfSSLException(jenv,
@@ -1885,70 +1896,18 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_freeSSL
 
 #if defined(HAVE_PK_CALLBACKS)
     #ifdef HAVE_ECC
-        /* free ECC sign callback CTX global reference if set */
-        pkCtx = (internCtx*) wolfSSL_GetEccSignCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-
-        /* free ECC verify callback CTX global reference if set */
-        pkCtx = (internCtx*)wolfSSL_GetEccVerifyCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-
-        /* free ECC shared secret callback CTX global reference if set */
-        pkCtx = (internCtx*)wolfSSL_GetEccSharedSecretCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
+        /* Free ECC PK callback contexts if set */
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetEccSignCtx(ssl));
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetEccVerifyCtx(ssl));
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetEccSharedSecretCtx(ssl));
     #endif /* HAVE_ECC */
 
     #ifndef NO_RSA
-        /* free RSA sign callback CTX global reference if set */
-        pkCtx = (internCtx*) wolfSSL_GetRsaSignCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-
-        /* free RSA verify callback CTX global reference if set */
-        pkCtx = (internCtx*)wolfSSL_GetRsaVerifyCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-
-        /* free RSA encrypt callback CTX global reference if set */
-        pkCtx = (internCtx*) wolfSSL_GetRsaEncCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-
-        /* free RSA decrypt callback CTX global reference if set */
-        pkCtx = (internCtx*) wolfSSL_GetRsaDecCtx(ssl);
-        if (pkCtx != NULL) {
-            if (pkCtx->obj != NULL) {
-                (*jenv)->DeleteGlobalRef(jenv, pkCtx->obj);
-            }
-            XFREE(pkCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
+        /* Free RSA PK callback contexts if set */
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetRsaSignCtx(ssl));
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetRsaVerifyCtx(ssl));
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetRsaEncCtx(ssl));
+        freePkCtx(jenv, (internCtx*) wolfSSL_GetRsaDecCtx(ssl));
     #endif /* !NO_RSA */
 #endif /* HAVE_PK_CALLBACKS */
 
@@ -4535,68 +4494,61 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_setTlsHmacInner
     return ret;
 }
 
-JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setEccSignCtx
-  (JNIEnv* jenv, jobject jcl, jlong sslPtr)
+#if defined(HAVE_PK_CALLBACKS) && (defined(HAVE_ECC) || !defined(NO_RSA))
+/* Helper for set*Ctx JNI functions.
+ * Installs new internCtx before freeing the old one. */
+static void setPkCtxHelper(JNIEnv* jenv, jobject jcl,
+    WOLFSSL* ssl, void* (*getCtx)(WOLFSSL*),
+    void (*setCtx)(WOLFSSL*, void*), const char* nullSslMsg,
+    const char* allocFailMsg)
 {
-#if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
-    jclass         sslClass;
+    internCtx* myCtx;
+    internCtx* oldCtx;
 
-    void*          eccSignCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
     if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setEccSignCtx");
+        throwWolfSSLException(jenv, nullSslMsg);
         return;
     }
 
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
+    /* Keep old ctx until new one is installed */
+    oldCtx = (internCtx*)getCtx(ssl);
 
-    /* free existing memory if it already exists, before we malloc again */
-    eccSignCtx = (internCtx*) wolfSSL_GetEccSignCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (eccSignCtx != NULL) {
-        myCtx = (internCtx*)eccSignCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
+    /* Allocate JNI context */
     myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (!myCtx) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for ECC sign context\n");
+    if (myCtx == NULL) {
+        throwWolfSSLException(jenv, allocFailMsg);
         return;
     }
 
-    /* set CTX as active */
+    /* Mark active */
     myCtx->active = 1;
 
-    /* store global ref to WolfSSLSession object */
+    /* Cache WolfSSLSession global ref */
     myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (!myCtx->obj) {
+    if (myCtx->obj == NULL) {
         throwWolfSSLException(jenv,
                "Unable to store WolfSSLSession object as global reference");
         XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
         return;
     }
 
-    wolfSSL_SetEccSignCtx(ssl, myCtx);
+    /* Install new ctx */
+    setCtx(ssl, myCtx);
+
+    /* Free old ctx if present */
+    freePkCtx(jenv, oldCtx);
+}
+#endif
+
+JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setEccSignCtx
+  (JNIEnv* jenv, jobject jcl, jlong sslPtr)
+{
+#if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetEccSignCtx, wolfSSL_SetEccSignCtx,
+        "Input WolfSSLSession object was null in setEccSignCtx",
+        "Unable to allocate memory for ECC sign context\n");
 #else
     (void)jcl;
     (void)sslPtr;
@@ -4610,63 +4562,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setEccVerifyCtx
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
 #if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
-    jclass         sslClass;
-
-    void*          eccVerifyCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
-    if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setEccVerifyCtx");
-        return;
-    }
-
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
-
-    /* free existing memory if it already exists, before we malloc again */
-    eccVerifyCtx = (internCtx*)wolfSSL_GetEccVerifyCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (eccVerifyCtx != NULL) {
-        myCtx = (internCtx*)eccVerifyCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
-    myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (!myCtx) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for ECC verify context\n");
-        return;
-    }
-
-    /* set CTX as active */
-    myCtx->active = 1;
-
-    /* store global ref to WolfSSLSession object */
-    myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (myCtx->obj == NULL) {
-        throwWolfSSLException(jenv,
-               "Unable to store WolfSSLSession object as global reference");
-        return;
-    }
-
-    wolfSSL_SetEccVerifyCtx(ssl, myCtx);
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetEccVerifyCtx, wolfSSL_SetEccVerifyCtx,
+        "Input WolfSSLSession object was null in setEccVerifyCtx",
+        "Unable to allocate memory for ECC verify context\n");
 #else
     (void)jcl;
     (void)sslPtr;
@@ -4680,63 +4580,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setEccSharedSecretCtx
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
 #if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
-    jclass         sslClass;
-
-    void*          eccSharedSecretCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && defined(HAVE_ECC)
-    if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setEccSharedSecretCtx");
-        return;
-    }
-
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
-
-    /* free existing memory if it already exists, before we malloc again */
-    eccSharedSecretCtx = (internCtx*) wolfSSL_GetEccSharedSecretCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (eccSharedSecretCtx != NULL) {
-        myCtx = (internCtx*)eccSharedSecretCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
-    myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (myCtx == NULL) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for ECC shared secret context\n");
-        return;
-    }
-
-    /* set CTX as active */
-    myCtx->active = 1;
-
-    /* store global ref to WolfSSLSession object */
-    myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (myCtx->obj == NULL) {
-        throwWolfSSLException(jenv,
-               "Unable to store WolfSSLSession object as global reference");
-        return;
-    }
-
-    wolfSSL_SetEccSharedSecretCtx(ssl, myCtx);
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetEccSharedSecretCtx, wolfSSL_SetEccSharedSecretCtx,
+        "Input WolfSSLSession object was null in setEccSharedSecretCtx",
+        "Unable to allocate memory for ECC shared secret context\n");
 #else
     (void)jcl;
     (void)sslPtr;
@@ -4750,63 +4598,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setRsaSignCtx
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
 #if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    jclass         sslClass;
-
-    void*          rsaSignCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setRsaSignCtx");
-        return;
-    }
-
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
-
-    /* free existing memory if it already exists, before we malloc again */
-    rsaSignCtx = (internCtx*) wolfSSL_GetRsaSignCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (rsaSignCtx != NULL) {
-        myCtx = (internCtx*)rsaSignCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
-    myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (myCtx == NULL) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for RSA sign context\n");
-        return;
-    }
-
-    /* set CTX as active */
-    myCtx->active = 1;
-
-    /* store global ref to WolfSSLSession object */
-    myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (myCtx->obj == NULL) {
-        throwWolfSSLException(jenv,
-               "Unable to store WolfSSLSession object as global reference");
-        return;
-    }
-
-    wolfSSL_SetRsaSignCtx(ssl, myCtx);
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetRsaSignCtx, wolfSSL_SetRsaSignCtx,
+        "Input WolfSSLSession object was null in setRsaSignCtx",
+        "Unable to allocate memory for RSA sign context\n");
 #else
     (void)jcl;
     (void)sslPtr;
@@ -4820,63 +4616,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setRsaVerifyCtx
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
 #if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    jclass         sslClass;
-
-    void*          rsaVerifyCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setRsaVerifyCtx");
-        return;
-    }
-
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
-
-    /* free existing memory if it already exists, before we malloc again */
-    rsaVerifyCtx = (internCtx*)wolfSSL_GetRsaVerifyCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (rsaVerifyCtx != NULL) {
-        myCtx = (internCtx*)rsaVerifyCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
-    myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (myCtx == NULL) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for RSA verify context\n");
-        return;
-    }
-
-    /* set CTX as active */
-    myCtx->active = 1;
-
-    /* store global ref to WolfSSLSession object */
-    myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (myCtx->obj == NULL) {
-        throwWolfSSLException(jenv,
-               "Unable to store WolfSSLSession object as global reference");
-        return;
-    }
-
-    wolfSSL_SetRsaVerifyCtx(ssl, myCtx);
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetRsaVerifyCtx, wolfSSL_SetRsaVerifyCtx,
+        "Input WolfSSLSession object was null in setRsaVerifyCtx",
+        "Unable to allocate memory for RSA verify context\n");
 #else
     (void)jcl;
     (void)sslPtr;
@@ -4890,63 +4634,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setRsaEncCtx
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
 #if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    jclass         sslClass;
-
-    void*          rsaEncCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setRsaEncCtx");
-        return;
-    }
-
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
-
-    /* free existing memory if it already exists, before we malloc again */
-    rsaEncCtx = (internCtx*) wolfSSL_GetRsaEncCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (rsaEncCtx != NULL) {
-        myCtx = (internCtx*)rsaEncCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
-    myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (myCtx == NULL) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for RSA encrypt context\n");
-        return;
-    }
-
-    /* set CTX as active */
-    myCtx->active = 1;
-
-    /* store global ref to WolfSSLSession object */
-    myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (myCtx->obj == NULL) {
-        throwWolfSSLException(jenv,
-               "Unable to store WolfSSLSession object as global reference");
-        return;
-    }
-
-    wolfSSL_SetRsaEncCtx(ssl, myCtx);
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetRsaEncCtx, wolfSSL_SetRsaEncCtx,
+        "Input WolfSSLSession object was null in setRsaEncCtx",
+        "Unable to allocate memory for RSA encrypt context\n");
 #else
     (void)jcl;
     (void)sslPtr;
@@ -4960,63 +4652,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setRsaDecCtx
   (JNIEnv* jenv, jobject jcl, jlong sslPtr)
 {
 #if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    jclass         sslClass;
-
-    void*          rsaDecCtx;
-    internCtx*     myCtx;
-    WOLFSSL* ssl = (WOLFSSL*)(uintptr_t)sslPtr;
-#endif
-
-#if defined(HAVE_PK_CALLBACKS) && !defined(NO_RSA)
-    if (ssl == NULL) {
-        throwWolfSSLException(jenv,
-            "Input WolfSSLSession object was null in "
-            "setRsaDecCtx");
-        return;
-    }
-
-    /* get WolfSSLSession class from object ref */
-    sslClass = (*jenv)->GetObjectClass(jenv, jcl);
-    if (!sslClass) {
-        throwWolfSSLException(jenv,
-                "Can't get WolfSSLSession object class");
-        return;
-    }
-
-    /* free existing memory if it already exists, before we malloc again */
-    rsaDecCtx = (internCtx*) wolfSSL_GetRsaDecCtx(ssl);
-
-    /* note: if CTX has not been set up yet, wolfSSL defaults to NULL */
-    if (rsaDecCtx != NULL) {
-        myCtx = (internCtx*)rsaDecCtx;
-        if (myCtx != NULL) {
-            if (myCtx->active == 1) {
-                (*jenv)->DeleteGlobalRef(jenv, myCtx->obj);
-            }
-            XFREE(myCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        }
-    }
-
-    /* allocate memory for internal JNI object reference */
-    myCtx = XMALLOC(sizeof(internCtx), NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (myCtx == NULL) {
-        throwWolfSSLException(jenv,
-                "Unable to allocate memory for RSA decrypt context\n");
-        return;
-    }
-
-    /* set CTX as active */
-    myCtx->active = 1;
-
-    /* store global ref to WolfSSLSession object */
-    myCtx->obj = (*jenv)->NewGlobalRef(jenv, jcl);
-    if (myCtx->obj == NULL) {
-        throwWolfSSLException(jenv,
-               "Unable to store WolfSSLSession object as global reference");
-        return;
-    }
-
-    wolfSSL_SetRsaDecCtx(ssl, myCtx);
+    setPkCtxHelper(jenv, jcl,
+        (WOLFSSL*)(uintptr_t)sslPtr,
+        wolfSSL_GetRsaDecCtx, wolfSSL_SetRsaDecCtx,
+        "Input WolfSSLSession object was null in setRsaDecCtx",
+        "Unable to allocate memory for RSA decrypt context\n");
 #else
     (void)jcl;
     (void)sslPtr;
