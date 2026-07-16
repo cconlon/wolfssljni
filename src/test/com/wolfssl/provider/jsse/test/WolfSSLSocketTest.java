@@ -2173,6 +2173,116 @@ public class WolfSSLSocketTest {
 
     }
 
+    /**
+     * With wantClientAuth(true) and needClientAuth(false), a client that
+     * presents a certificate the server cannot validate must abort the
+     * handshake, matching SunJSSE. wantClientAuth only makes an absent
+     * client cert non-fatal, not an invalid one.
+     */
+    @Test
+    public void testWantClientAuthRejectsUntrustedClientCert()
+        throws Exception {
+
+        /* Negative case: server does not trust the presented client cert.
+         * Server truststore (caServerJKS) does not contain the CA that signed
+         * the client cert, so a presented client cert cannot be validated. */
+        SSLContext srvCtx = tf.createSSLContext("TLSv1.2", ctxProvider,
+            tf.createTrustManager("SunX509", tf.caServerJKS, ctxProvider),
+            tf.createKeyManager("SunX509", tf.serverJKS, ctxProvider));
+
+        /* Client trusts the server and has a client cert (clientJKS) to
+         * present when the server sends a CertificateRequest. */
+        SSLContext cliCtx = tf.createSSLContext("TLSv1.2", ctxProvider,
+            tf.createTrustManager("SunX509", tf.caServerJKS, ctxProvider),
+            tf.createKeyManager("SunX509", tf.clientJKS, ctxProvider));
+
+        SSLServerSocket ss = (SSLServerSocket)srvCtx.getServerSocketFactory()
+            .createServerSocket(0);
+        SSLSocket cs = (SSLSocket)cliCtx.getSocketFactory().createSocket();
+        cs.connect(new InetSocketAddress(ss.getLocalPort()));
+
+        final SSLSocket server = (SSLSocket)ss.accept();
+        server.setWantClientAuth(true);
+        server.setNeedClientAuth(false);
+
+        ExecutorService es = Executors.newSingleThreadExecutor();
+        Future<Void> serverFuture = es.submit(new Callable<Void>() {
+            @Override
+            public Void call() throws Exception {
+                try {
+                    server.startHandshake();
+                    fail("Server accepted an untrusted client cert under " +
+                        "wantClientAuth");
+
+                } catch (SSLException e) {
+                    /* expected: presented client cert failed validation */
+                }
+                server.close();
+                return null;
+            }
+        });
+
+        try {
+            cs.startHandshake();
+            fail("Client handshake succeeded despite server rejecting cert");
+
+        } catch (SSLException e) {
+            /* expected: server sent a fatal alert */
+        }
+        cs.close();
+
+        es.shutdown();
+        serverFuture.get();
+        ss.close();
+
+        /* Server truststore (caClientJKS) trusts the client cert, so a valid
+         * presented client cert must let the handshake complete. */
+        SSLContext srvCtx2 = tf.createSSLContext("TLSv1.2", ctxProvider,
+            tf.createTrustManager("SunX509", tf.caClientJKS, ctxProvider),
+            tf.createKeyManager("SunX509", tf.serverJKS, ctxProvider));
+
+        SSLContext cliCtx2 = tf.createSSLContext("TLSv1.2", ctxProvider,
+            tf.createTrustManager("SunX509", tf.caServerJKS, ctxProvider),
+            tf.createKeyManager("SunX509", tf.clientJKS, ctxProvider));
+
+        ss = (SSLServerSocket)srvCtx2.getServerSocketFactory()
+            .createServerSocket(0);
+        cs = (SSLSocket)cliCtx2.getSocketFactory().createSocket();
+        cs.connect(new InetSocketAddress(ss.getLocalPort()));
+
+        final SSLSocket server2 = (SSLSocket)ss.accept();
+        server2.setWantClientAuth(true);
+        server2.setNeedClientAuth(false);
+
+        es = Executors.newSingleThreadExecutor();
+        serverFuture = es.submit(new Callable<Void>() {
+            @Override
+            public Void call() throws Exception {
+                try {
+                    server2.startHandshake();
+
+                } catch (SSLException e) {
+                    fail("Server rejected a valid client cert under " +
+                        "wantClientAuth");
+                }
+                server2.close();
+                return null;
+            }
+        });
+
+        try {
+            cs.startHandshake();
+
+        } catch (SSLException e) {
+            fail("Client handshake failed with a valid client cert");
+        }
+        cs.close();
+
+        es.shutdown();
+        serverFuture.get();
+        ss.close();
+    }
+
     @Test
     public void testProtocolTLSv10() throws Exception {
 

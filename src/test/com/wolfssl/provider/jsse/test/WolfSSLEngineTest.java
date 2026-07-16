@@ -1006,22 +1006,27 @@ public class WolfSSLEngineTest {
         };
 
         /* All combinations with external X509ExtendedTrustManager registered
-         * which will trust NO client certs and ALL server certs */
+         * which will trust NO client certs and ALL server certs. The client
+         * presents a cert, so when the server requests one (want or need) it
+         * fails validation and the handshake aborts. wantClientAuth only makes
+         * an absent client cert non-fatal, matching SunJSSE, so serverWant with
+         * a presented-but-rejected cert is expected to fail. Only the cases
+         * where the server requests no client cert succeed. */
         PeerAuthConfig[] configsDefaultManagers = new PeerAuthConfig[] {
             new PeerAuthConfig(true, true, true, true, false),
-            new PeerAuthConfig(true, true, true, false, true),
+            new PeerAuthConfig(true, true, true, false, false),
             new PeerAuthConfig(true, true, false, true, false),
             new PeerAuthConfig(true, true, false, false, true),
             new PeerAuthConfig(true, false, true, true, false),
-            new PeerAuthConfig(true, false, true, false, true),
+            new PeerAuthConfig(true, false, true, false, false),
             new PeerAuthConfig(true, false, false, true, false),
             new PeerAuthConfig(true, false, false, false, true),
             new PeerAuthConfig(false, true, true, true, false),
-            new PeerAuthConfig(false, true, true, false, true),
+            new PeerAuthConfig(false, true, true, false, false),
             new PeerAuthConfig(false, true, false, true, false),
             new PeerAuthConfig(false, true, false, false, true),
             new PeerAuthConfig(false, false, true, true, false),
-            new PeerAuthConfig(false, false, true, false, true),
+            new PeerAuthConfig(false, false, true, false, false),
             new PeerAuthConfig(false, false, false, true, false),
             new PeerAuthConfig(false, false, false, false, true)
         };
