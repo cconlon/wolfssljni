@@ -287,6 +287,14 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1check_1host
 
 /*
  * Class:     com_wolfssl_WolfSSLCertificate
+ * Method:    X509_check_ip_asc
+ * Signature: (JLjava/lang/String;J)I
+ */
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1check_1ip_1asc
+  (JNIEnv *, jclass, jlong, jstring, jlong);
+
+/*
+ * Class:     com_wolfssl_WolfSSLCertificate
  * Method:    X509_get_ext_d2i_name_constraints
  * Signature: (J)J
  */

@@ -751,7 +751,7 @@ public final class WolfSSLTrustX509 extends X509ExtendedTrustManager {
                     () -> "trying hostname verification against SNI: " +
                     tmpSniName);
 
-                ret = peerCert.checkHost(sniHostName);
+                ret = WolfSSLUtil.verifyHostnameOrIp(peerCert, sniHostName, 0);
                 if (ret == WolfSSL.SSL_SUCCESS) {
                     /* Hostname successfully verified against SNI name */
                     WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
@@ -776,13 +776,12 @@ public final class WolfSSLTrustX509 extends X509ExtendedTrustManager {
                 () -> "trying hostname verification against peer host: " +
                 peerHost);
 
-            if (type == HOSTNAME_TYPE_LDAPS) {
-                /* LDAPS requires wildcard left-most matching only */
-                ret = peerCert.checkHost(peerHost,
-                        WolfSSL.WOLFSSL_LEFT_MOST_WILDCARD_ONLY);
-            } else {
-                ret = peerCert.checkHost(peerHost);
-            }
+            /* LDAPS requires wildcard left-most matching only. IP literals
+             * are matched against iPAddress SANs only, handled inside
+             * verifyHostnameOrIp(). */
+            long flags = (type == HOSTNAME_TYPE_LDAPS) ?
+                WolfSSL.WOLFSSL_LEFT_MOST_WILDCARD_ONLY : 0;
+            ret = WolfSSLUtil.verifyHostnameOrIp(peerCert, peerHost, flags);
             if (ret == WolfSSL.SSL_SUCCESS) {
                 /* Hostname successfully verified against peer host name */
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,

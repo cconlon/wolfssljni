@@ -1099,9 +1099,8 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1check_1host
         /* peerNamePtr not used */
         ret = wolfSSL_X509_check_host(x509, hostname,
             XSTRLEN(hostname), (unsigned int)flags, NULL);
+        (*jenv)->ReleaseStringUTFChars(jenv, chk, hostname);
     }
-
-    (*jenv)->ReleaseStringUTFChars(jenv, chk, hostname);
 
     return (jint)ret;
 
@@ -1112,6 +1111,39 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1check_1host
     (void)chk;
     (void)flags;
     (void)peerNamePtr;
+    return (jint)NOT_COMPILED_IN;
+#endif
+}
+
+JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLCertificate_X509_1check_1ip_1asc
+  (JNIEnv* jenv, jclass jcl, jlong x509Ptr, jstring ipasc, jlong flags)
+{
+#ifndef NO_ASN
+    int ret = WOLFSSL_FAILURE;
+    const char* ip = NULL;
+    WOLFSSL_X509* x509 = (WOLFSSL_X509*)(uintptr_t)x509Ptr;
+    (void)jcl;
+
+    if (jenv == NULL || ipasc == NULL) {
+        return WOLFSSL_FAILURE;
+    }
+
+    /* Matches only iPAddress SAN entries. Does not fall back to Subject CN or
+       a dNSName, required for IP address ref identities (RFC 6125/2818). */
+    ip = (*jenv)->GetStringUTFChars(jenv, ipasc, 0);
+    if (ip != NULL) {
+        ret = wolfSSL_X509_check_ip_asc(x509, ip, (unsigned int)flags);
+        (*jenv)->ReleaseStringUTFChars(jenv, ipasc, ip);
+    }
+
+    return (jint)ret;
+
+#else
+    (void)jenv;
+    (void)jcl;
+    (void)x509Ptr;
+    (void)ipasc;
+    (void)flags;
     return (jint)NOT_COMPILED_IN;
 #endif
 }

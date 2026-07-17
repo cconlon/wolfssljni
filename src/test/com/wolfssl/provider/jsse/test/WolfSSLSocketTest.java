@@ -2028,6 +2028,16 @@ public class WolfSSLSocketTest {
          * matched the certificate IP SAN, so this subcase confirms the
          * hostname, not the resolved IP, is what verification runs against. */
         connectHttpsAndCheckVerification("wolfssl.invalid", false);
+
+        /* IP literal matching the certificate iPAddress SAN (IP:127.0.0.1)
+         * must verify. Confirms IP reference identities are still matched
+         * against iPAddress SANs after routing them away from checkHost. */
+        connectHttpsAndCheckVerification("127.0.0.1", true);
+
+        /* IP literal not present in the certificate iPAddress SAN must fail.
+         * It must not match the DNS SAN (example.com) or the Subject CN,
+         * which is what an IP identity is forbidden from doing (RFC 6125). */
+        connectHttpsAndCheckVerification("127.0.0.2", false);
     }
 
     @Test

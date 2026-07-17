@@ -797,6 +797,90 @@ public class WolfSSLCertificateTest {
         }
     }
 
+    /* Generate a self-signed cert with the given CN and an optional single
+     * SubjectAltName entry, return its DER encoding. */
+    private byte[] genIpTestCertDer(String cn, String sanValue, int sanType)
+        throws WolfSSLException, WolfSSLJNIException, IOException {
+
+        WolfSSLCertificate x509 = new WolfSSLCertificate();
+        WolfSSLX509Name name = new WolfSSLX509Name();
+
+        Instant now = Instant.now();
+        x509.setNotBefore(Date.from(now));
+        x509.setNotAfter(Date.from(now.plus(Duration.ofDays(365))));
+        x509.setSerialNumber(BigInteger.valueOf(1122));
+
+        name.setCountryName("US");
+        name.setOrganizationName("wolfSSL Inc.");
+        name.setCommonName(cn);
+        x509.setSubjectName(name);
+
+        x509.setPublicKey(cliKeyPubDer, WolfSSL.RSAk,
+            WolfSSL.SSL_FILETYPE_ASN1);
+
+        if (sanValue != null) {
+            x509.addAltName(sanValue, sanType);
+        }
+
+        x509.signCert(cliKeyDer, WolfSSL.RSAk,
+            WolfSSL.SSL_FILETYPE_ASN1, "SHA256");
+
+        byte[] der = x509.getDer();
+
+        name.free();
+        x509.free();
+
+        return der;
+    }
+
+    /* An IP address reference identity must be matched only against an
+     * iPAddress SAN, never the Subject CN or a dNSName SAN (RFC 6125 /
+     * RFC 2818). checkIpAddress() must reject a cert whose only "match" is a
+     * CN equal to the IP or a dNSName SAN holding the IP as text, and accept
+     * a cert with a real iPAddress SAN. wolfSSL_X509_check_host() would accept
+     * the first two by CN or dNSName fallback, which is why IP identities use
+     * checkIpAddress() instead. */
+    @Test
+    public void test_checkIpAddress()
+        throws WolfSSLException, WolfSSLJNIException, IOException {
+
+        Assume.assumeTrue(WolfSSL.FileSystemEnabled());
+
+        /* The strict "IP identity never falls back to the Subject CN"
+         * behavior that checkIpAddress() relies on was added to native
+         * wolfSSL_X509_check_ip_asc() in wolfSSL 5.9.2. On older versions a
+         * CN=IP cert with no SAN still matches by CN. Cross-version IP
+         * matching is covered by the endpoint-identification test. */
+        Assume.assumeTrue(WolfSSL.getLibVersionHex() >= 0x05009002L);
+
+        final String ip = "192.0.2.1";
+
+        /* Case A: CN = IP, no SAN. Must be rejected (no CN fallback). */
+        byte[] derA = genIpTestCertDer(ip, null, 0);
+        WolfSSLCertificate certA = new WolfSSLCertificate(derA);
+        assertEquals("CN=IP with no SAN must not match by IP",
+            WolfSSL.SSL_FAILURE, certA.checkIpAddress(ip));
+        certA.free();
+
+        /* Case B: dNSName SAN = IP text. Must be rejected (a dNSName is not
+         * an iPAddress SAN). */
+        byte[] derB = genIpTestCertDer("wolfssl.com", ip, WolfSSL.ASN_DNS_TYPE);
+        WolfSSLCertificate certB = new WolfSSLCertificate(derB);
+        assertEquals("dNSName SAN holding an IP string must not match by IP",
+            WolfSSL.SSL_FAILURE, certB.checkIpAddress(ip));
+        certB.free();
+
+        /* Case C: iPAddress SAN = IP. Must be accepted, and a different IP
+         * must not match. */
+        byte[] derC = genIpTestCertDer("wolfssl.com", ip, WolfSSL.ASN_IP_TYPE);
+        WolfSSLCertificate certC = new WolfSSLCertificate(derC);
+        assertEquals("iPAddress SAN must match by IP",
+            WolfSSL.SSL_SUCCESS, certC.checkIpAddress(ip));
+        assertEquals("non-matching IP must be rejected",
+            WolfSSL.SSL_FAILURE, certC.checkIpAddress("198.51.100.9"));
+        certC.free();
+    }
+
     @Test
     public void testWolfSSLCertificateExtensionSetters()
         throws WolfSSLException, WolfSSLJNIException, IOException,
