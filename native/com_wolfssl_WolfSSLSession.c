@@ -5543,6 +5543,7 @@ int NativeALPNSelectCb(WOLFSSL *ssl, const unsigned char **out,
     peerProtosCopy = (char*)XMALLOC(peerProtosSz + 1, NULL,
         DYNAMIC_TYPE_TMP_BUFFER);
     if (peerProtosCopy == NULL) {
+        wolfSSL_ALPN_FreePeerProtocol(ssl, &peerProtos);
         if ((*jenv)->ExceptionOccurred(jenv)) {
             (*jenv)->ExceptionDescribe(jenv);
             (*jenv)->ExceptionClear(jenv);
