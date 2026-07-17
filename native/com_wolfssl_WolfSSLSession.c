@@ -111,6 +111,7 @@ int NativeSSLVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
     jobjectRefType refcheck;
     SSLAppData* appData;            /* WOLFSSL app data, stored verify cb obj */
     jobject* g_verifySSLCbIfaceObj;  /* Global jobject, stored in app data */
+    jobject   verifyCbObj = NULL;    /* Local ref promoted from stored global */
 
     if (!g_vm) {
         /* we can't throw an exception yet, so just return 0 (failure) */
@@ -135,41 +136,53 @@ int NativeSSLVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
 
     /* get app data to retrieve stored Java jobject callback object */
     appData = (SSLAppData*)wolfSSL_get_app_data(
-                wolfSSL_X509_STORE_CTX_get_ex_data(store, 0));
+        wolfSSL_X509_STORE_CTX_get_ex_data(store, 0));
     if (appData == NULL) {
         printf("Error getting app data from WOLFSSL\n");
-        if (needsDetach)
+        if (needsDetach) {
             (*g_vm)->DetachCurrentThread(g_vm);
+        }
         return -105;
     }
 
-    /* get global Java verify callback object */
+    /* Promote stored global callback ref to a local ref under g_verifyCbMutex
+     * so a concurrent setVerify() cannot free it mid-call. appData stays valid
+     * via jniSessLock, held by the read/write caller. */
+    (void)NativeVerifyCbLock();
     g_verifySSLCbIfaceObj = appData->g_verifySSLCbIfaceObj;
-    if (g_verifySSLCbIfaceObj == NULL || *g_verifySSLCbIfaceObj == NULL) {
+    if ((g_verifySSLCbIfaceObj != NULL) && (*g_verifySSLCbIfaceObj != NULL)) {
+        verifyCbObj = (*jenv)->NewLocalRef(jenv, *g_verifySSLCbIfaceObj);
+    }
+    (void)NativeVerifyCbUnlock();
+
+    if (verifyCbObj == NULL) {
         printf("Error getting g_verifySSLCbIfaceObj from appData\n");
-        if (needsDetach)
+        if (needsDetach) {
             (*g_vm)->DetachCurrentThread(g_vm);
+        }
         return -106;
     }
 
-    /* check if our stored object reference is valid */
-    refcheck = (*jenv)->GetObjectRefType(jenv, *g_verifySSLCbIfaceObj);
-    if (refcheck == 2) {
+    /* valid ref check: non-zero type covers local/global/weak, and verifyCbObj
+     * is a promoted local ref */
+    refcheck = (*jenv)->GetObjectRefType(jenv, verifyCbObj);
+    if (refcheck != 0) {
 
         if (!g_verifyCallbackMethodId) {
             if ((*jenv)->ExceptionOccurred(jenv)) {
                 (*jenv)->ExceptionDescribe(jenv);
                 (*jenv)->ExceptionClear(jenv);
             }
-
             throwWolfSSLJNIException(jenv,
                 "verifyCallback method ID is null in NativeSSLVerifyCallback");
-            if (needsDetach)
+            (*jenv)->DeleteLocalRef(jenv, verifyCbObj);
+            if (needsDetach) {
                 (*g_vm)->DetachCurrentThread(g_vm);
+            }
             return -107;
         }
 
-        retval = (*jenv)->CallIntMethod(jenv, *g_verifySSLCbIfaceObj,
+        retval = (*jenv)->CallIntMethod(jenv, verifyCbObj,
                 g_verifyCallbackMethodId, preverify_ok,
                 (jlong)(uintptr_t)store);
 
@@ -177,6 +190,7 @@ int NativeSSLVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
             /* exception occurred on the Java side during method call */
             (*jenv)->ExceptionDescribe(jenv);
             (*jenv)->ExceptionClear(jenv);
+            (*jenv)->DeleteLocalRef(jenv, verifyCbObj);
             if (needsDetach)
                 (*g_vm)->DetachCurrentThread(g_vm);
             return -109;
@@ -190,10 +204,13 @@ int NativeSSLVerifyCallback(int preverify_ok, WOLFSSL_X509_STORE_CTX* store)
 
         throwWolfSSLJNIException(jenv,
                 "Object reference invalid in NativeSSLVerifyCallback");
+        (*jenv)->DeleteLocalRef(jenv, verifyCbObj);
         if (needsDetach)
             (*g_vm)->DetachCurrentThread(g_vm);
         return -1;
     }
+
+    (*jenv)->DeleteLocalRef(jenv, verifyCbObj);
 
     if (needsDetach)
         (*g_vm)->DetachCurrentThread(g_vm);
@@ -1853,7 +1870,12 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_freeSSL
             XFREE(appData->jniSessLock, NULL, DYNAMIC_TYPE_TMP_BUFFER);
             appData->jniSessLock = NULL;
         }
+        /* Clear the stored pointer under g_verifyCbMutex, then free the prior
+         * ref and its container after unlocking, matching setVerify(). */
+        (void)NativeVerifyCbLock();
         g_cachedVerifyCb = appData->g_verifySSLCbIfaceObj;
+        appData->g_verifySSLCbIfaceObj = NULL;
+        (void)NativeVerifyCbUnlock();
         if (g_cachedVerifyCb != NULL) {
             (*jenv)->DeleteGlobalRef(jenv, (jobject)(*g_cachedVerifyCb));
             XFREE(g_cachedVerifyCb, NULL, DYNAMIC_TYPE_TMP_BUFFER);
@@ -4837,15 +4859,18 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setVerify
         return;
     }
 
-    /* Release global reference if already set, before setting again */
+    /* Clear stored pointer under g_verifyCbMutex, then free prior ref and its
+     * container after unlocking. */
     appData = (SSLAppData*)wolfSSL_get_app_data(ssl);
     if (appData != NULL) {
+        (void)NativeVerifyCbLock();
         verifyCb = appData->g_verifySSLCbIfaceObj;
+        appData->g_verifySSLCbIfaceObj = NULL;
+        (void)NativeVerifyCbUnlock();
         if (verifyCb != NULL) {
             (*jenv)->DeleteGlobalRef(jenv, (jobject)(*verifyCb));
             XFREE(verifyCb, NULL, DYNAMIC_TYPE_TMP_BUFFER);
             verifyCb = NULL;
-            appData->g_verifySSLCbIfaceObj = NULL;
         }
     }
 
@@ -4876,7 +4901,11 @@ JNIEXPORT void JNICALL Java_com_wolfssl_WolfSSLSession_setVerify
 		        XFREE(verifyCb, NULL, DYNAMIC_TYPE_TMP_BUFFER);
             }
             else {
+                /* Publish under g_verifyCbMutex so a concurrent callback
+                 * reads a consistent pointer. */
+                (void)NativeVerifyCbLock();
                 appData->g_verifySSLCbIfaceObj = verifyCb;
+                (void)NativeVerifyCbUnlock();
 
                 /* set verify mode, register Java callback with wolfSSL */
                 wolfSSL_set_verify(ssl, mode, NativeSSLVerifyCallback);
