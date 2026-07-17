@@ -65,7 +65,7 @@ public class WolfSSLAuthStore {
     private WolfSSLSessionContext serverCtx = null;
     private WolfSSLSessionContext clientCtx = null;
 
-    private SessionStore<Integer, WolfSSLImplementSSLSession> store = null;
+    private SessionStore<String, WolfSSLImplementSSLSession> store = null;
     private static final Object storeLock = new Object();
 
     /**
@@ -282,7 +282,7 @@ public class WolfSSLAuthStore {
      * @param side server/client side for cache resize
      */
     protected void resizeCache(int sz, int side) {
-        SessionStore<Integer, WolfSSLImplementSSLSession> newStore =
+        SessionStore<String, WolfSSLImplementSSLSession> newStore =
                 new SessionStore<>(sz);
 
         /* @TODO check for side server/client, currently a resize is for all */
@@ -328,8 +328,7 @@ public class WolfSSLAuthStore {
 
         boolean needNewSession = false;
         WolfSSLImplementSSLSession ses = null;
-        String toHash = null;
-        int hashCode = 0;
+        String cacheKey = null;
 
         if (ssl == null) {
             return null;
@@ -349,9 +348,8 @@ public class WolfSSLAuthStore {
          * Synchronizes on storeLock internally. */
         printSessionStoreStatus();
 
-        /* Generate cache key hash (host:port), outside lock */
-        toHash = host.concat(Integer.toString(port));
-        hashCode = toHash.hashCode();
+        /* Generate cache key (host:port), outside lock */
+        cacheKey = sessionCacheKey(host, port);
 
         /* Lock on static/global storeLock while getting session out of
          * store, since Java session cache table is shared between all
@@ -359,14 +357,14 @@ public class WolfSSLAuthStore {
         synchronized (storeLock) {
 
             /* Try getting session out of Java store */
-            ses = store.get(hashCode);
+            ses = store.get(cacheKey);
 
             /* Remove old entry from table. TLS 1.3 binder changes between
              * resumptions and stored session should only be used to
              * resume once. New session structure/object will be cached
              * after the resumed session completes the handshake, for
              * subsequent resumption attempts to use. */
-            store.remove(hashCode);
+            store.remove(cacheKey);
         }
 
         /* Check conditions where we need to create a new new session:
@@ -599,15 +597,30 @@ public class WolfSSLAuthStore {
     }
 
     /**
+     * Build the client session cache key from peer host and port.
+     *
+     * The key is a "host:port" String so the cache map compares hosts with
+     * String.equals() and distinct hosts never share a slot. The ':' separator
+     * keeps the port unambiguous even when the host ends in digits or is an
+     * IPv6 literal.
+     *
+     * @param host peer host name or IP literal, must not be null
+     * @param port peer port number
+     * @return session cache key String
+     */
+    private String sessionCacheKey(String host, int port) {
+        return host + ":" + Integer.toString(port);
+    }
+
+    /**
      * Add SSLSession into wolfJSSE Java session cache table, to be used
      * for session resumption.
      *
-     * Session is stored into the session table using a hash code as the key.
-     * If the peer host is not null, the hash code is based on a concatenation
-     * of the peer host and port. If the peer host is null, the hash code
-     * is based on the session ID (if ID is not null, and non-zero length).
-     * Otherwise, no hash code is generated and the session is not stored into
-     * the session cache table.
+     * Session is stored into the session table using a String key. If the
+     * peer host is not null, the key is the "host:port" String. If the peer
+     * host is null, the key is based on the session ID (if ID is not null,
+     * and non-zero length). Otherwise, no key is generated and the session is
+     * not stored into the session cache table.
      *
      * This method synchronizes on the static/global storeLock object, since
      * the session cache is global and shared amongst all threads.
@@ -617,8 +630,7 @@ public class WolfSSLAuthStore {
      */
     protected int addSession(WolfSSLImplementSSLSession session) {
 
-        String toHash;
-        final int hashCode;
+        final String cacheKey;
         final boolean haveKey;
 
         /* Don't store session if invalid (or not complete with sesPtr
@@ -640,40 +652,38 @@ public class WolfSSLAuthStore {
 
         if (session.getPeerHost() != null) {
             /* Generate key for storing into session table (host:port) */
-            toHash = session.getPeerHost().concat(Integer.toString(
-                     session.getPeerPort()));
-            hashCode = toHash.hashCode();
+            cacheKey = sessionCacheKey(session.getPeerHost(),
+                session.getPeerPort());
             haveKey = true;
         }
         else {
-            /* If no peer host is available then create hash key from
+            /* If no peer host is available then create key from
              * session ID if not null, not zero length, and not all zeros */
             byte[] sessionId = session.getId();
             if (sessionId != null && sessionId.length > 0 &&
                 (idAllZeros(sessionId) == false)) {
-                hashCode = Arrays.toString(session.getId()).hashCode();
+                cacheKey = Arrays.toString(sessionId);
                 haveKey = true;
             } else {
-                hashCode = 0;
+                cacheKey = null;
                 haveKey = false;
             }
         }
 
-        /* Only store session into cache if we have a usable key. If session
-         * already exists for hashCode, it will be overwritten with the new
-         * version. Note that hashCode == 0 is a legitimate hash value, so
-         * we use haveKey rather than hashCode == 0 to gate caching. */
+        /* Only store session into cache if we have a usable key. If a session
+         * already exists for cacheKey, it will be overwritten with the new
+         * version. */
         if (haveKey) {
             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                 () -> "stored session in cache table (host: " +
                 session.getPeerHost() + ", port: " +
-                session.getPeerPort() + ") " + "hashCode = " + hashCode +
+                session.getPeerPort() + ") " + "cacheKey = " + cacheKey +
                 " side = " + session.getSideString());
 
             /* Lock access to store while adding new session, store is global */
             synchronized (storeLock) {
                 session.isInTable = true;
-                store.put(hashCode, session);
+                store.put(cacheKey, session);
             }
 
             printSessionStoreStatus();
