@@ -412,6 +412,96 @@ public class WolfSSLSessionContextTest {
         }
     }
 
+    /* Perform one TLS 1.3 SSLEngine handshake and return the server and
+     * client session IDs as {serverId, clientId}. Returns null if TLS 1.3
+     * is not enabled in this build. */
+    private byte[][] tls13HandshakeSessionIds() throws Exception {
+
+        String proto[] = {"TLSv1.3"};
+
+        SSLEngine server = this.ctx.createSSLEngine();
+        SSLEngine client = this.ctx.createSSLEngine(
+            "wolfSSL begin handshake test", 11111);
+
+        server.setUseClientMode(false);
+        server.setNeedClientAuth(false);
+        client.setUseClientMode(true);
+
+        if (!Arrays.asList(server.getEnabledProtocols())
+                .contains("TLSv1.3")) {
+            return null;
+        }
+        server.setEnabledProtocols(proto);
+        client.setEnabledProtocols(proto);
+
+        server.beginHandshake();
+        client.beginHandshake();
+
+        if (tf.testConnection(server, client, null, null,
+                "Test in/out bound") != 0) {
+            fail("failed to complete handshake");
+        }
+
+        byte[] serverId = server.getSession().getId();
+        byte[] clientId = client.getSession().getId();
+
+        tf.CloseConnection(server, client, false);
+
+        return new byte[][] { serverId, clientId };
+    }
+
+    /* TLS 1.3 has no traditional session ID, so wolfJSSE generates a
+     * SecureRandom pseudo ID. Verify each ID is full length and that
+     * independent sessions on the same side get unique IDs, so the ID is
+     * per-session random and not derived from a per-role or object value. */
+    @Test
+    public void testSessionIDsTLS13Unguessable() throws Exception {
+
+        /* Disable client session cache so each handshake creates a fresh,
+         * non-resumed session, letting us check per-session uniqueness */
+        String originalProp = Security.getProperty(
+            "wolfjsse.clientSessionCache.disabled");
+        Security.setProperty("wolfjsse.clientSessionCache.disabled", "true");
+
+        try {
+            this.ctx = tf.createSSLContext("TLS", engineProvider);
+
+            byte[][] ids1 = tls13HandshakeSessionIds();
+            Assume.assumeTrue("TLSv1.3 not enabled", ids1 != null);
+            byte[][] ids2 = tls13HandshakeSessionIds();
+
+            byte[] serverId1 = ids1[0];
+            byte[] clientId1 = ids1[1];
+            byte[] serverId2 = ids2[0];
+            byte[] clientId2 = ids2[1];
+
+            /* Pseudo session ID is a full 32-byte SecureRandom value */
+            byte[][] allIds = { serverId1, clientId1, serverId2, clientId2 };
+            for (byte[] id : allIds) {
+                if (id == null || id.length != 32) {
+                    fail("pseudo session ID wrong length: " +
+                        (id == null ? "null" : id.length));
+                }
+            }
+
+            /* Independent sessions on the same side must not share an ID */
+            if (Arrays.equals(clientId1, clientId2)) {
+                fail("client pseudo session IDs must be unique per session");
+            }
+            if (Arrays.equals(serverId1, serverId2)) {
+                fail("server pseudo session IDs must be unique per session");
+            }
+
+            /* Server and client within a handshake also differ */
+            if (Arrays.equals(serverId1, clientId1)) {
+                fail("server and client pseudo session IDs must differ");
+            }
+
+        } finally {
+            restoreClientSessionCacheProperty(originalProp);
+        }
+    }
+
     @Test
     public void testSessionIDs()
         throws NoSuchProviderException, NoSuchAlgorithmException,
