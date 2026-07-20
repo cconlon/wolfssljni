@@ -2709,120 +2709,132 @@ public class WolfSSLSocket extends SSLSocket {
                 throw new NullPointerException("Input array is null");
             }
 
-            /* check if socket is closing */
-            if (isClosing.get()) {
-                throw new SocketException(
-                    "InputStream in process of being closed");
-            }
-
-            /* check if socket is closed */
-            if (this.isClosed || socket == null || socket.isClosed()) {
+            if (socket == null) {
                 throw new SocketException("Socket is closed");
             }
 
-            /* check if connection has already been closed/shutdown */
-            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                () -> "trying to get socket.handshakeLock (read)");
-
-            synchronized (socket.handshakeLock) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "thread got socket.handshakeLock (read)");
-
-                if (socket.connectionClosed == true) {
-                    throw new SocketException("Connection already shutdown");
-                }
-            }
-
-            /* do handshake if not completed yet, handles synchronization */
-            try {
-                /* do handshake if not completed yet, handles synchronization */
-                if (socket.handshakeComplete == false &&
-                    socket.handshakeStarted == false) {
-                    socket.startHandshake();
-                }
-            } catch (SocketTimeoutException e) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "got socket timeout in read()");
-                throw e;
-            }
-
-            if (b.length == 0 || len == 0) {
-                return 0;
-            }
-
-            if (off < 0 || len < 0 || len > (b.length - off)) {
-                throw new IndexOutOfBoundsException(
-                    "Array index out of bounds");
-            }
-
-            /* Enter I/O operation to prevent use-after-free */
+            /* Enter I/O op before state checks below, so close() either
+             * defers ssl.freeSSL() until this read exits or the checks
+             * below throw before the SSL session is used */
             socket.enterIOOperation();
 
             try {
+                /* check if socket is closing */
+                if (isClosing.get()) {
+                    throw new SocketException(
+                        "InputStream in process of being closed");
+                }
+
+                /* check if socket is closed */
+                if (this.isClosed || socket.isClosed()) {
+                    throw new SocketException("Socket is closed");
+                }
+
+                /* check if connection has already been closed/shutdown */
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "trying to get socket.handshakeLock (read)");
+
+                synchronized (socket.handshakeLock) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "thread got socket.handshakeLock (read)");
+
+                    if (socket.connectionClosed == true) {
+                        throw new SocketException(
+                            "Connection already shutdown");
+                    }
+                }
+
+                try {
+                    /* do handshake if not completed yet, handles
+                     * synchronization */
+                    if (socket.handshakeComplete == false &&
+                        socket.handshakeStarted == false) {
+                        socket.startHandshake();
+                    }
+                } catch (SocketTimeoutException e) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "got socket timeout in read()");
+                    throw e;
+                }
+
+                if (b.length == 0 || len == 0) {
+                    return 0;
+                }
+
+                if (off < 0 || len < 0 || len > (b.length - off)) {
+                    throw new IndexOutOfBoundsException(
+                        "Array index out of bounds");
+                }
+
                 int err;
                 int timeout = socket.getSoTimeout();
 
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                     () -> "ssl.read() socket timeout = " + timeout);
 
-                ret = ssl.read(b, off, len, timeout);
-                err = ssl.getError(ret);
+                try {
+                    ret = ssl.read(b, off, len, timeout);
+                    err = ssl.getError(ret);
 
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "ssl.read(off: " + off + ", len: " + len +
-                    ") ret = " + ret + ", err = " + err);
-
-                /* check for end of stream */
-                if ((err == WolfSSL.SSL_ERROR_ZERO_RETURN) ||
-                    ((err == WolfSSL.SSL_ERROR_SOCKET_PEER_CLOSED) &&
-                     (ret == 0))) {
                     WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "ssl.read() got SSL_ERROR_ZERO_RETURN, " + err +
-                        ", end of stream");
+                        () -> "ssl.read(off: " + off + ", len: " + len +
+                        ") ret = " + ret + ", err = " + err);
 
-                    /* End of stream */
-                    return -1;
-                }
-
-                if (ret < 0) {
-                    /* other errors besides end of stream or WANT_READ
-                     * are treated as I/O errors and throw an exception */
-                    String errStr = WolfSSL.getErrorString(err);
-                    if (err == WolfSSL.SOCKET_ERROR_E) {
-                        /* Socket error, indicate to caller by returning
-                         * end of stream */
+                    /* check for end of stream */
+                    if ((err == WolfSSL.SSL_ERROR_ZERO_RETURN) ||
+                        ((err == WolfSSL.SSL_ERROR_SOCKET_PEER_CLOSED) &&
+                         (ret == 0))) {
                         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "Native wolfSSL_read() error: " + errStr +
-                            " (error code: " + err + "ret: " + ret +
-                            "), end of stream");
+                            () -> "ssl.read() got SSL_ERROR_ZERO_RETURN, " +
+                            err + ", end of stream");
+
+                        /* End of stream */
                         return -1;
-
-                    } else {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "Native wolfSSL_read() error: " + errStr +
-                            " (error code: " + err + ", ret: " + ret + ")");
-                        throw new IOException("Native wolfSSL_read() " +
-                            "error: " + errStr +
-                            " (error code: " + err + ", ret: " + ret + ")");
                     }
-                }
 
-            } catch (SocketException e) {
-                /* ssl.read() can throw SocketException from poll() if fd
-                 * closed or peer shut down connection */
-                if (e.getMessage().contains("fd closed during poll") ||
-                    e.getMessage().contains("disconnected during poll")) {
-                    /* end of stream */
-                    return -1;
-                }
-                throw e;
+                    if (ret < 0) {
+                        /* other errors besides end of stream or WANT_READ
+                         * are treated as I/O errors and throw an exception */
+                        String errStr = WolfSSL.getErrorString(err);
+                        if (err == WolfSSL.SOCKET_ERROR_E) {
+                            /* Socket error, indicate to caller by returning
+                             * end of stream */
+                            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                                () -> "Native wolfSSL_read() error: " +
+                                errStr + " (error code: " + err + "ret: " +
+                                ret + "), end of stream");
+                            return -1;
 
-            } catch (IllegalStateException e) {
-                /* SSLSocket.close() may have already called freeSSL(),
-                 * thus causing a 'WolfSSLSession object has been freed'
-                 * IllegalStateException to be thrown from
-                 * WolfSSLSession.read(). Return as a SocketException here. */
-                throw new SocketException(e.getMessage());
+                        } else {
+                            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                                () -> "Native wolfSSL_read() error: " +
+                                errStr + " (error code: " + err + ", ret: " +
+                                ret + ")");
+                            throw new IOException("Native wolfSSL_read() " +
+                                "error: " + errStr + " (error code: " + err +
+                                ", ret: " + ret + ")");
+                        }
+                    }
+
+                } catch (SocketException e) {
+                    /* ssl.read() can throw SocketException from poll() if fd
+                     * closed or peer shut down connection */
+                    String msg = e.getMessage();
+                    if (msg != null &&
+                        (msg.contains("fd closed during poll") ||
+                         msg.contains("disconnected during poll"))) {
+                        /* end of stream */
+                        return -1;
+                    }
+                    throw e;
+
+                } catch (IllegalStateException e) {
+                    /* SSLSocket.close() may have already called freeSSL(),
+                     * thus causing a 'WolfSSLSession object has been freed'
+                     * IllegalStateException to be thrown from
+                     * WolfSSLSession.read(). Return as a SocketException. */
+                    throw new SocketException(e.getMessage());
+                }
             } finally {
                 /* Exit I/O operation */
                 socket.exitIOOperation();
@@ -2931,91 +2943,104 @@ public class WolfSSLSocket extends SSLSocket {
                 throw new NullPointerException("Input array is null");
             }
 
-            /* check if socket is closing */
-            if (isClosing.get()) {
-                throw new SocketException(
-                    "OutputStream in process of being closed");
-            }
-
-            /* check if socket is closed */
-            if (this.isClosed || socket == null || socket.isClosed()) {
+            if (socket == null) {
                 throw new SocketException("Socket is closed");
             }
 
-            /* check if connection has already been closed/shutdown */
-            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                () -> "trying to get socket.handshakeLock (write)");
-
-            synchronized (socket.handshakeLock) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "thread got socket.handshakeLock (write)");
-                if (socket.connectionClosed == true) {
-                    throw new SocketException(
-                        "Connection already shutdown");
-                }
-            }
-
-            try {
-                /* do handshake if not completed yet, handles synchronization */
-                if (socket.handshakeComplete == false &&
-                    socket.handshakeStarted == false) {
-                    socket.startHandshake();
-                }
-            } catch (SocketTimeoutException e) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "got socket timeout in write()");
-                throw e;
-            }
-
-            if (off < 0 || len < 0 || (off + len) > b.length) {
-                throw new IndexOutOfBoundsException(
-                    "Array index out of bounds");
-            }
-
-            /* Enter I/O operation to prevent use-after-free */
+            /* Enter I/O op before state checks below, so close() either
+             * defers ssl.freeSSL() until this write exits or the checks
+             * below throw before the SSL session is used */
             socket.enterIOOperation();
 
             try {
+                /* check if socket is closing */
+                if (isClosing.get()) {
+                    throw new SocketException(
+                        "OutputStream in process of being closed");
+                }
+
+                /* check if socket is closed */
+                if (this.isClosed || socket.isClosed()) {
+                    throw new SocketException("Socket is closed");
+                }
+
+                /* check if connection has already been closed/shutdown */
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "trying to get socket.handshakeLock (write)");
+
+                synchronized (socket.handshakeLock) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "thread got socket.handshakeLock (write)");
+                    if (socket.connectionClosed == true) {
+                        throw new SocketException(
+                            "Connection already shutdown");
+                    }
+                }
+
+                try {
+                    /* do handshake if not completed yet, handles
+                     * synchronization */
+                    if (socket.handshakeComplete == false &&
+                        socket.handshakeStarted == false) {
+                        socket.startHandshake();
+                    }
+                } catch (SocketTimeoutException e) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "got socket timeout in write()");
+                    throw e;
+                }
+
+                if (off < 0 || len < 0 || (off + len) > b.length) {
+                    throw new IndexOutOfBoundsException(
+                        "Array index out of bounds");
+                }
+
                 int err;
                 int timeout = socket.getSoTimeout();
 
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                     () -> "ssl.write() socket timeout = " + timeout);
 
-                ret = ssl.write(b, off, len, timeout);
-                err = ssl.getError(ret);
+                /* Scope the freed-session catch to ssl.write() only, so a
+                 * close() racing an implicit handshake above propagates
+                 * unchanged */
+                try {
+                    ret = ssl.write(b, off, len, timeout);
+                    err = ssl.getError(ret);
 
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "ssl.write(off: " + off + ", len: " + len +
-                    ") returned ret = " + ret + ", err = " + err);
-
-                /* check for end of stream */
-                if (err == WolfSSL.SSL_ERROR_ZERO_RETURN) {
                     WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "ssl.write() got SSL_ERROR_ZERO_RETURN, " +
-                        "end of stream");
+                        () -> "ssl.write(off: " + off + ", len: " + len +
+                        ") returned ret = " + ret + ", err = " + err);
 
-                    /* check to see if we received a close notify alert.
-                     * if so, throw SocketException since peer has closed
-                     * the connection */
-                    if (ssl.gotCloseNotify() == true) {
-                        throw new SocketException("Peer closed connection");
+                    /* check for end of stream */
+                    if (err == WolfSSL.SSL_ERROR_ZERO_RETURN) {
+                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                            () -> "ssl.write() got SSL_ERROR_ZERO_RETURN, " +
+                            "end of stream");
+
+                        /* check to see if we received a close notify alert.
+                         * if so, throw SocketException since peer has closed
+                         * the connection */
+                        if (ssl.gotCloseNotify() == true) {
+                            throw new SocketException(
+                                "Peer closed connection");
+                        }
                     }
-                }
 
-                if (ret < 0) {
-                    /* print error description string */
-                    String errStr = WolfSSL.getErrorString(err);
-                    throw new IOException("Native wolfSSL_write() error: " +
-                        errStr + " (ret: " + ret + ", error code: " +
-                        err + ")");
-                }
+                    if (ret < 0) {
+                        /* print error description string */
+                        String errStr = WolfSSL.getErrorString(err);
+                        throw new IOException(
+                            "Native wolfSSL_write() error: " + errStr +
+                            " (ret: " + ret + ", error code: " + err + ")");
+                    }
 
-            } catch (IllegalStateException e) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                                 () -> "got IllegalStateException: " + e +
-                                 ", throwing IOException");
-                throw new IOException(e);
+                } catch (IllegalStateException e) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                                     () -> "got IllegalStateException: " + e +
+                                     ", throwing IOException");
+                    throw new IOException(e);
+                }
             } finally {
                 /* Exit I/O operation */
                 socket.exitIOOperation();
