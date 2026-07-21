@@ -73,6 +73,7 @@ jobs:
         with:
           distribution: ${{ inputs.jdk_distro }}
           java-version: ${{ inputs.jdk_version }}
+          cache: 'maven'
 
       - name: Set LD_LIBRARY_PATH
         run: |
@@ -81,13 +82,10 @@ jobs:
       - name: Build JNI library
         run: ./java.sh $GITHUB_WORKSPACE/build-dir
 
-      # Maven build
-      - name: mvn compile
-        run: mvn compile
-
-      - name: mvn test
-        run: mvn test
-
+      # Maven build. A single mvn package runs the compile, test, and
+      # package phases in one lifecycle pass. Separate compile, test,
+      # and package steps would run the whole test suite twice, once
+      # for the test step and again inside package.
       - name: mvn package
         run: mvn package
 
