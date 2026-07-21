@@ -114,6 +114,7 @@ public class WolfSSLCertificate implements Serializable {
     static native long X509_load_certificate_file(String path, int format);
     static native int X509_check_host(long x509, String chk, long flags,
         long peerName);
+    static native int X509_check_ip_asc(long x509, String ipasc, long flags);
     static native long X509_get_ext_d2i_name_constraints(long x509);
 
     /* native functions used for X509v3 certificate generation */
@@ -2139,6 +2140,38 @@ public class WolfSSLCertificate implements Serializable {
                 flags + ")");
 
             return X509_check_host(this.x509Ptr, hostname, flags, 0);
+        }
+    }
+
+    /**
+     * Checks that the given IP address literal matches an iPAddress entry in
+     * this certificate's SubjectAltName extension.
+     *
+     * Unlike {@link #checkHost(String)}, this only matches iPAddress SAN
+     * entries. It never falls back to the Subject CommonName or a dNSName
+     * SAN, as required for IP address reference identities by RFC 6125 and
+     * RFC 2818.
+     *
+     * @param ipAddress IP address literal to check certificate against, in
+     *        text form (ex: "192.0.2.1" or "::1")
+     *
+     * @return WolfSSL.SSL_SUCCESS on successful iPAddress match,
+     *         WolfSSL.SSL_FAILURE on invalid match or error, or
+     *         WolfSSL.NOT_COMPILED_IN if native wolfSSL has been compiled
+     *         with NO_ASN defined and native API is not available.
+     *
+     * @throws IllegalStateException if WolfSSLCertificate has been freed.
+     */
+    public int checkIpAddress(String ipAddress) throws IllegalStateException {
+
+        confirmObjectIsActive();
+
+        synchronized (x509Lock) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
+                WolfSSLDebug.INFO, this.x509Ptr,
+                () -> "entering checkIpAddress(" + ipAddress + ")");
+
+            return X509_check_ip_asc(this.x509Ptr, ipAddress, 0);
         }
     }
 

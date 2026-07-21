@@ -59,6 +59,7 @@ import com.wolfssl.WolfSSLPskClientCallback;
 import com.wolfssl.WolfSSLPskServerCallback;
 import com.wolfssl.WolfSSLTls13SecretCallback;
 import com.wolfssl.WolfSSLSession;
+import com.wolfssl.WolfSSLVerifyCallback;
 import com.wolfssl.WolfSSLByteBufferIORecvCallback;
 import com.wolfssl.WolfSSLByteBufferIOSendCallback;
 
@@ -4435,6 +4436,270 @@ public class WolfSSLSessionTest {
             }
             if (ctx != null) {
                 ctx.free();
+            }
+        }
+    }
+
+    /* Verify callback, one Java object (and JNI global ref) per instance, used
+     * to exercise the session-level setVerify() ref lifecycle. */
+    private static class CountingVerifyCb implements WolfSSLVerifyCallback {
+        public volatile int calls = 0;
+        public int verifyCallback(int preverify_ok, long x509StorePtr) {
+            calls++;
+            return preverify_ok;
+        }
+    }
+
+    /* Walks setVerify() install/replace/null/re-install on one session, then
+     * frees and forces GC to surface dangling-ref issues under checked JNI.
+     * No handshake, validates only the setVerify() ref bookkeeping. */
+    @Test
+    public void test_WolfSSLSession_setVerifyRefLifecycle()
+        throws WolfSSLException, WolfSSLJNIException, Exception {
+
+        WolfSSLContext localCtx = null;
+        WolfSSLSession ssl = null;
+        CountingVerifyCb cb1 = new CountingVerifyCb();
+        CountingVerifyCb cb2 = new CountingVerifyCb();
+        CountingVerifyCb cb3 = new CountingVerifyCb();
+
+        localCtx = createAndSetupWolfSSLContext(cliCert, cliKey,
+            WolfSSL.SSL_FILETYPE_PEM, caCert,
+            WolfSSL.SSLv23_ClientMethod());
+
+        try {
+            ssl = new WolfSSLSession(localCtx);
+
+            /* Install initial callback. */
+            ssl.setVerify(WolfSSL.SSL_VERIFY_PEER, cb1);
+
+            /* Replace, exercises the prior-ref release path. */
+            ssl.setVerify(WolfSSL.SSL_VERIFY_PEER, cb2);
+
+            /* Unregister the callback (null path). */
+            ssl.setVerify(WolfSSL.SSL_VERIFY_PEER, null);
+
+            /* Re-install after the null pass. */
+            ssl.setVerify(WolfSSL.SSL_VERIFY_PEER, cb3);
+
+            /* Encourage GC of the replaced callback objects. */
+            System.gc();
+
+            /* Keep callbacks strongly reachable to end of test. */
+            assertNotNull(cb1);
+            assertNotNull(cb2);
+            assertNotNull(cb3);
+
+        } finally {
+            if (ssl != null) {
+                ssl.freeSSL();
+            }
+            if (localCtx != null) {
+                localCtx.free();
+            }
+        }
+    }
+
+    /* Concurrency smoke test: many threads run setVerify()/freeSSL() cycles on
+     * their own sessions, contending on the global verify callback mutex.
+     * Checks locked paths are deadlock-free and ref-safe under sanitizers. */
+    @Test
+    public void test_WolfSSLSession_setVerifyConcurrentLifecycle()
+        throws WolfSSLException, WolfSSLJNIException, Exception {
+
+        final int numThreads = 8;
+        final int iterations = 200;
+
+        ExecutorService es = Executors.newFixedThreadPool(numThreads);
+        final CountDownLatch startLatch = new CountDownLatch(1);
+        Future<?>[] futures = new Future<?>[numThreads];
+
+        try {
+            for (int t = 0; t < numThreads; t++) {
+                futures[t] = es.submit(new Callable<Void>() {
+                    @Override
+                    public Void call() throws Exception {
+                        WolfSSLContext threadCtx =
+                            createAndSetupWolfSSLContext(cliCert, cliKey,
+                                WolfSSL.SSL_FILETYPE_PEM, caCert,
+                                WolfSSL.SSLv23_ClientMethod());
+                        try {
+                            /* Release all threads together for contention. */
+                            startLatch.await();
+                            for (int i = 0; i < iterations; i++) {
+                                WolfSSLSession ssl =
+                                    new WolfSSLSession(threadCtx);
+                                try {
+                                    ssl.setVerify(WolfSSL.SSL_VERIFY_PEER,
+                                        new CountingVerifyCb());
+                                    ssl.setVerify(WolfSSL.SSL_VERIFY_PEER,
+                                        new CountingVerifyCb());
+                                    ssl.setVerify(WolfSSL.SSL_VERIFY_PEER,
+                                        null);
+                                    ssl.setVerify(WolfSSL.SSL_VERIFY_PEER,
+                                        new CountingVerifyCb());
+                                } finally {
+                                    ssl.freeSSL();
+                                }
+                            }
+                        } finally {
+                            threadCtx.free();
+                        }
+                        return null;
+                    }
+                });
+            }
+
+            startLatch.countDown();
+
+            for (Future<?> f : futures) {
+                f.get(60, TimeUnit.SECONDS);
+            }
+
+        } finally {
+            es.shutdownNow();
+            try {
+                es.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /* Test TLS 1.2 handshake with a session-level verify callback confirms the
+     * callback fires (via the NewLocalRef promotion) and verify succeeds. */
+    @Test
+    public void test_WolfSSLSession_setVerifyHandshakeCallback()
+        throws WolfSSLException, WolfSSLJNIException, Exception {
+
+        Assume.assumeTrue(WolfSSL.RsaEnabled() && WolfSSL.FileSystemEnabled());
+        Assume.assumeTrue(WolfSSL.TLSv12Enabled());
+
+        int ret;
+        int err;
+        Socket cliSock = null;
+        WolfSSLSession ssl = null;
+        final CountingVerifyCb cliVerifyCb = new CountingVerifyCb();
+
+        WolfSSLContext srvCtx = null;
+        WolfSSLContext cliCtx = null;
+        ServerSocket srvSocket = null;
+        ExecutorService es = null;
+        Future<Void> srvFuture = null;
+
+        try {
+            srvSocket = new ServerSocket(0);
+            final int port = srvSocket.getLocalPort();
+
+            srvCtx = createAndSetupWolfSSLContext(srvCert, srvKey,
+                WolfSSL.SSL_FILETYPE_PEM, cliCert,
+                WolfSSL.TLSv1_2_ServerMethod());
+            cliCtx = createAndSetupWolfSSLContext(cliCert, cliKey,
+                WolfSSL.SSL_FILETYPE_PEM, caCert,
+                WolfSSL.TLSv1_2_ClientMethod());
+
+            es = Executors.newSingleThreadExecutor();
+
+            final ServerSocket fSrvSock = srvSocket;
+            final WolfSSLContext fSrvCtx = srvCtx;
+            srvFuture = es.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    int sret;
+                    int serr;
+                    Socket server = null;
+                    WolfSSLSession srvSes = null;
+                    try {
+                        server = fSrvSock.accept();
+                        srvSes = new WolfSSLSession(fSrvCtx);
+
+                        sret = srvSes.setFd(server);
+                        if (sret != WolfSSL.SSL_SUCCESS) {
+                            throw new Exception(
+                                "server setFd() failed: " + sret);
+                        }
+
+                        do {
+                            sret = srvSes.accept();
+                            serr = srvSes.getError(sret);
+                        } while (sret != WolfSSL.SSL_SUCCESS &&
+                                 (serr == WolfSSL.SSL_ERROR_WANT_READ ||
+                                  serr == WolfSSL.SSL_ERROR_WANT_WRITE));
+
+                        if (sret != WolfSSL.SSL_SUCCESS) {
+                            throw new Exception(
+                                "server accept() failed: " + sret);
+                        }
+
+                        srvSes.shutdownSSL();
+                    } finally {
+                        if (srvSes != null) {
+                            srvSes.freeSSL();
+                        }
+                        if (server != null) {
+                            server.close();
+                        }
+                    }
+                    return null;
+                }
+            });
+
+            cliSock = new Socket("localhost", port);
+            ssl = new WolfSSLSession(cliCtx);
+
+            ret = ssl.setFd(cliSock);
+            if (ret != WolfSSL.SSL_SUCCESS) {
+                throw new Exception("client setFd() failed: " + ret);
+            }
+
+            /* Register verify callback at the session level. */
+            ssl.setVerify(WolfSSL.SSL_VERIFY_PEER, cliVerifyCb);
+
+            do {
+                ret = ssl.connect();
+                err = ssl.getError(ret);
+            } while (ret != WolfSSL.SSL_SUCCESS &&
+                     (err == WolfSSL.SSL_ERROR_WANT_READ ||
+                      err == WolfSSL.SSL_ERROR_WANT_WRITE));
+
+            if (ret != WolfSSL.SSL_SUCCESS) {
+                throw new Exception("client connect() failed: " + ret);
+            }
+
+            /* Callback must have fired during the handshake. */
+            assertTrue("session verify callback did not fire",
+                cliVerifyCb.calls > 0);
+
+            ssl.shutdownSSL();
+
+            srvFuture.get(10, TimeUnit.SECONDS);
+
+        } finally {
+            if (ssl != null) {
+                ssl.freeSSL();
+            }
+            if (cliSock != null) {
+                cliSock.close();
+            }
+            if (srvSocket != null && !srvSocket.isClosed()) {
+                srvSocket.close();
+            }
+            if (srvFuture != null) {
+                srvFuture.cancel(true);
+            }
+            if (es != null) {
+                es.shutdownNow();
+                try {
+                    es.awaitTermination(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (cliCtx != null) {
+                cliCtx.free();
+            }
+            if (srvCtx != null) {
+                srvCtx.free();
             }
         }
     }

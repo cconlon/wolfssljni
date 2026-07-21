@@ -35,6 +35,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 
 import com.wolfssl.WolfSSL;
+import com.wolfssl.WolfSSLCertificate;
 import com.wolfssl.WolfSSLDebug;
 import com.wolfssl.WolfSSLException;
 
@@ -782,5 +783,134 @@ public class WolfSSLUtil {
         return ks;
     }
 
+    /**
+     * Verify a reference identity (host name or IP address literal) against a
+     * peer certificate.
+     *
+     * IP address literals are matched only against iPAddress SAN entries, via
+     * wolfSSL_X509_check_ip_asc(). They are never matched against the Subject
+     * CommonName or a dNSName SAN, as required by RFC 6125 and RFC 2818. Host
+     * names use wolfSSL_X509_check_host(), which matches dNSName SANs with a
+     * CN fallback.
+     *
+     * @param peerCert peer certificate to check against
+     * @param name reference identity (host name or IP literal) to verify
+     * @param flags checkHost flags, applied only to host name matching
+     *
+     * @return WolfSSL.SSL_SUCCESS on match, otherwise WolfSSL.SSL_FAILURE
+     */
+    protected static int verifyHostnameOrIp(WolfSSLCertificate peerCert,
+        String name, long flags) {
+
+        if (peerCert == null || name == null) {
+            return WolfSSL.SSL_FAILURE;
+        }
+
+        if (isIpAddress(name)) {
+            /* Match against iPAddress SANs using the bracket-free form. A
+             * cert stores IPv6 addresses without the "[...]" brackets that
+             * can wrap an IPv6 literal in a URL or host:port string. */
+            return peerCert.checkIpAddress(stripIpv6Brackets(name));
+        }
+
+        return peerCert.checkHost(name, flags);
+    }
+
+    /**
+     * Return true if the given string is an IPv4 or IPv6 address literal.
+     *
+     * Does not perform DNS resolution. Used to route IP reference identities
+     * to iPAddress SAN matching, since a host name and an IP literal are
+     * verified against different certificate fields (RFC 6125).
+     *
+     * @param host string to test, may be null
+     *
+     * @return true if host is an IP address literal, otherwise false
+     */
+    protected static boolean isIpAddress(String host) {
+
+        String h;
+
+        if (host == null || host.isEmpty()) {
+            return false;
+        }
+
+        h = stripIpv6Brackets(host);
+
+        /* A DNS host name never contains ':', so any ':' means IPv6 literal. */
+        if (h.indexOf(':') != -1) {
+            return true;
+        }
+
+        return isIPv4Literal(h);
+    }
+
+    /**
+     * Strip surrounding "[...]" brackets from an IPv6 address literal, ex:
+     * "[::1]" becomes "::1". Returns the input unchanged if not bracketed.
+     * A certificate stores IPv6 iPAddress SANs without brackets, so they must
+     * be removed before matching an IP reference identity against the cert.
+     *
+     * @param host string to strip, may be null
+     *
+     * @return host with any surrounding IPv6 brackets removed
+     */
+    private static String stripIpv6Brackets(String host) {
+
+        boolean bracketed;
+
+        if (host == null || host.length() < 2) {
+            return host;
+        }
+
+        bracketed = (host.charAt(0) == '[') &&
+            (host.charAt(host.length() - 1) == ']');
+
+        if (bracketed) {
+            return host.substring(1, host.length() - 1);
+        }
+
+        return host;
+    }
+
+    /**
+     * Return true if the given string is a strict IPv4 dotted-quad literal,
+     * meaning four octets each in the range 0 to 255.
+     *
+     * @param s string to test
+     *
+     * @return true if s is an IPv4 literal, otherwise false
+     */
+    private static boolean isIPv4Literal(String s) {
+
+        int octets = 0;
+        int start = 0;
+        int len = s.length();
+
+        for (int i = 0; i <= len; i++) {
+            if (i == len || s.charAt(i) == '.') {
+                int fieldLen = i - start;
+                int val = 0;
+
+                if (fieldLen < 1 || fieldLen > 3) {
+                    return false;
+                }
+                for (int j = start; j < i; j++) {
+                    char c = s.charAt(j);
+                    if (c < '0' || c > '9') {
+                        return false;
+                    }
+                    val = (val * 10) + (c - '0');
+                }
+                if (val > 255) {
+                    return false;
+                }
+                octets++;
+                start = i + 1;
+            }
+        }
+
+        return (octets == 4);
+    }
 }
 

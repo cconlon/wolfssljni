@@ -288,22 +288,23 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
             return 0;
         }
 
-        /* Verify hostname against certificate SAN/CN using native
-         * wolfSSL X509_check_host() */
+        /* Verify hostname against certificate SAN/CN using native wolfSSL.
+         * IP address literals are matched against iPAddress SANs only, never
+         * CN or a dNSName, per RFC 6125 / RFC 2818. */
         final String tmpHost = peerHost;
         WolfSSLCertificate wCert = null;
         try {
             wCert = new WolfSSLCertificate(peer.getEncoded());
-            int ret = wCert.checkHost(peerHost);
+            int ret = WolfSSLUtil.verifyHostnameOrIp(wCert, peerHost, 0);
             if (ret == WolfSSL.SSL_SUCCESS) {
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "Provider-level hostname verification " +
-                        "passed for: " + tmpHost);
+                    () -> "Provider-level hostname verification passed for: " +
+                        tmpHost);
                 return 1;
             } else {
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "Provider-level hostname verification " +
-                        "FAILED for: " + tmpHost);
+                    () -> "Provider-level hostname verification FAILED for: " +
+                        tmpHost);
                 this.verifyException = new CertificateException(
                     "Hostname verification failed for: " + tmpHost);
                 return 0;

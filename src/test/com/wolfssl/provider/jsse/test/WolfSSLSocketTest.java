@@ -2028,6 +2028,16 @@ public class WolfSSLSocketTest {
          * matched the certificate IP SAN, so this subcase confirms the
          * hostname, not the resolved IP, is what verification runs against. */
         connectHttpsAndCheckVerification("wolfssl.invalid", false);
+
+        /* IP literal matching the certificate iPAddress SAN (IP:127.0.0.1)
+         * must verify. Confirms IP reference identities are still matched
+         * against iPAddress SANs after routing them away from checkHost. */
+        connectHttpsAndCheckVerification("127.0.0.1", true);
+
+        /* IP literal not present in the certificate iPAddress SAN must fail.
+         * It must not match the DNS SAN (example.com) or the Subject CN,
+         * which is what an IP identity is forbidden from doing (RFC 6125). */
+        connectHttpsAndCheckVerification("127.0.0.2", false);
     }
 
     @Test
@@ -2679,6 +2689,144 @@ public class WolfSSLSocketTest {
                 Security.setProperty(
                     "wolfjsse.clientSessionCache.disabled", originalProp);
             }
+        }
+    }
+
+    /* Two host labels whose "host"+"port" String.hashCode() collides must not
+     * share a client session cache slot. Otherwise one host could resume or
+     * evict another host's cached session. */
+    @Test
+    public void testSessionResumptionHostKeyedNoHashCollision()
+        throws Exception {
+
+        byte[] sessionIdAa = null;
+        byte[] sessionIdColliding = null;
+        byte[] sessionIdAaResume = null;
+        String protocol = null;
+
+        /* TLS 1.2/1.1/1.0 resume via session ID or ticket. TLS 1.3 is
+         * excluded here for the same reason as testSessionResumption(). */
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv11Enabled()) {
+            protocol = "TLSv1.1";
+        } else if (WolfSSL.TLSv1Enabled()) {
+            protocol = "TLSv1.0";
+        }
+        Assume.assumeNotNull(protocol);
+
+        /* "Aa" and "BB" both contribute 2112 to String.hashCode(), so
+         * "Aa.corp.internal"+port and "BB.corp.internal"+port collide in
+         * hashCode() while differing as Strings. Both resolve to loopback via
+         * getByAddress() so the TCP connection reaches the local test server,
+         * while the hostname label used for the cache key stays distinct. */
+        byte[] loopback = new byte[]{127, 0, 0, 1};
+        InetAddress hostAa =
+            InetAddress.getByAddress("Aa.corp.internal", loopback);
+        InetAddress hostBb =
+            InetAddress.getByAddress("BB.corp.internal", loopback);
+
+        /* Make sure client session cache is enabled for this test. */
+        String originalProp = Security.getProperty(
+            "wolfjsse.clientSessionCache.disabled");
+        Security.setProperty("wolfjsse.clientSessionCache.disabled", "false");
+
+        SSLServerSocket ss = null;
+        ExecutorService es = null;
+        Future<Void> serverFuture = null;
+
+        try {
+            this.ctx = tf.createSSLContext(protocol, ctxProvider);
+
+            ss = (SSLServerSocket)ctx.getServerSocketFactory()
+                    .createServerSocket(0);
+            final int port = ss.getLocalPort();
+            final SSLServerSocket fss = ss;
+
+            SSLSocketFactory cliFactory = ctx.getSocketFactory();
+
+            /* Server accepts three sequential handshakes. */
+            es = Executors.newSingleThreadExecutor();
+            serverFuture = es.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    try {
+                        for (int i = 0; i < 3; i++) {
+                            SSLSocket server = (SSLSocket)fss.accept();
+                            server.startHandshake();
+                            server.close();
+                        }
+                    } catch (SSLException e) {
+                        fail();
+                    }
+                    return null;
+                }
+            });
+
+            try {
+                /* #1: host label "Aa...", full handshake, gets cached. */
+                SSLSocket cs = (SSLSocket)cliFactory.createSocket();
+                cs.connect(new InetSocketAddress(hostAa, port));
+                cs.startHandshake();
+                sessionIdAa = cs.getSession().getId();
+                cs.close();
+
+                /* #2: colliding host label "BB...". Must not resume or evict
+                 * Aa's cached session even though "BB..."+port and
+                 * "Aa..."+port share a 32-bit hashCode. */
+                cs = (SSLSocket)cliFactory.createSocket();
+                cs.connect(new InetSocketAddress(hostBb, port));
+                cs.startHandshake();
+                sessionIdColliding = cs.getSession().getId();
+                cs.close();
+
+                /* #3: reconnect "Aa...". Its cached session must still be
+                 * present (not evicted by BB) and resume. */
+                cs = (SSLSocket)cliFactory.createSocket();
+                cs.connect(new InetSocketAddress(hostAa, port));
+                cs.startHandshake();
+                sessionIdAaResume = cs.getSession().getId();
+                cs.close();
+
+            } catch (SSLHandshakeException e) {
+                fail();
+            }
+
+            /* Surface any server-thread failure, bounded so a stuck server
+             * cannot hang the suite. */
+            serverFuture.get(10, TimeUnit.SECONDS);
+
+            /* Colliding host must get its own session, not Aa's. */
+            if (Arrays.equals(sessionIdAa, sessionIdColliding)) {
+                fail("colliding host resumed victim host's session");
+            }
+
+            /* Same host still resumes, so the String key does not break
+             * legitimate resumption and BB did not evict Aa's entry. */
+            if (!Arrays.equals(sessionIdAa, sessionIdAaResume)) {
+                fail("same host failed to resume after colliding host connect");
+            }
+
+        } finally {
+            /* Close the server socket first so any pending accept() unblocks,
+             * then tear down the executor. Runs on every path so a failure
+             * cannot leave threads or sockets behind. */
+            if (ss != null && !ss.isClosed()) {
+                try {
+                    ss.close();
+                } catch (IOException e) {
+                    /* ignore */
+                }
+            }
+            if (serverFuture != null) {
+                serverFuture.cancel(true);
+            }
+            if (es != null) {
+                es.shutdownNow();
+            }
+            /* Restore the original property state. */
+            Security.setProperty("wolfjsse.clientSessionCache.disabled",
+                originalProp == null ? "" : originalProp);
         }
     }
 

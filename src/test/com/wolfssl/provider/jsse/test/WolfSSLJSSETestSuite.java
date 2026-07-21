@@ -41,6 +41,7 @@ import org.junit.runners.Suite;
     WolfSSLServiceLoaderTest.class,
     WolfSSLParametersPskTest.class,
     WolfSSLNamedGroupsTest.class,
+    WolfSSLUtilTest.class,
     WolfSSLPQCKeyExchangeTest.class,
     WolfSSLPQCAuthenticationTest.class,
     WolfSSLPQCAuthKeyStoreTest.class,
