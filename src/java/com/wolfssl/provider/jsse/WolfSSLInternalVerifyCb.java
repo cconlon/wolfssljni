@@ -638,18 +638,17 @@ public class WolfSSLInternalVerifyCb implements WolfSSLVerifyCallback {
         else if ((!this.clientMode) && (this.params != null) &&
             this.params.getWantClientAuth() &&
             (!this.params.getNeedClientAuth())) {
-            /* wantClientAuth is set and client sent a certificate.
-             * Try to verify via TrustManager, but don't fail the
-             * handshake if verification fails — matches SunJSSE
-             * behavior where wantClientAuth is non-fatal. */
-            if (VerifyCertChainWithTrustManager(x509certs, authType)) {
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "wantClientAuth: client cert verified successfully");
-            } else {
+            /* wantClientAuth only makes an absent client cert non-fatal.
+             * A cert that is presented must still validate, matching SunJSSE,
+             * so abort the handshake if the TrustManager rejects it. */
+            if (VerifyCertChainWithTrustManager(x509certs, authType) == false) {
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                     () -> "wantClientAuth: client cert verification failed, " +
-                    "continuing handshake (non-fatal)");
+                    "aborting handshake");
+                return 0;
             }
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                () -> "wantClientAuth: client cert verified successfully");
         }
         else {
             /* Poll X509TrustManager / X509ExtendedTrustManager for certificate

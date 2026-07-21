@@ -5036,6 +5036,14 @@ int  NativeRsaVerifyCb(WOLFSSL* ssl, unsigned char* sig, unsigned int sigSz,
     if ((*jenv)->ExceptionOccurred(jenv)) {
         (*jenv)->ExceptionDescribe(jenv);
         (*jenv)->ExceptionClear(jenv);
+        (*jenv)->DeleteLocalRef(jenv, ctxRef);
+        (*jenv)->DeleteLocalRef(jenv, sigBB);
+        (*jenv)->DeleteLocalRef(jenv, outBB);
+        (*jenv)->DeleteLocalRef(jenv, keyDerBB);
+        if (needsDetach) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+        return -1;
     }
 
     /* point out* to the beginning of our decrypted buffer */
