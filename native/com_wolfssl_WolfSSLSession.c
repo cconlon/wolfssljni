@@ -830,9 +830,9 @@ enum {
 static int socketSelect(SSLAppData* appData, int sockfd, int timeout_ms, int rx,
     int shutdown)
 {
-    fd_set fds, errfds;
-    fd_set* recvfds = NULL;
-    fd_set* sendfds = NULL;
+    fd_set recvfds, sendfds, errfds;
+    fd_set* recvfdsPtr = NULL;
+    fd_set* sendfdsPtr = NULL;
     int nfds = sockfd + 1;
     int result = 0;
     struct timeval timeout;
@@ -861,15 +861,29 @@ static int socketSelect(SSLAppData* appData, int sockfd, int timeout_ms, int rx,
         timeout.tv_sec = timeout_ms / 1000;
         timeout.tv_usec = (timeout_ms % 1000) * 1000;
 
-        /* file/socket descriptors */
-        FD_ZERO(&fds);
-        FD_SET(sockfd, &fds);
+        /* Monitor the socket descriptor for readability or writability
+         * depending on the direction of the blocked I/O operation */
+        FD_ZERO(&recvfds);
+        FD_ZERO(&sendfds);
+        if (rx) {
+            FD_SET(sockfd, &recvfds);
+            recvfdsPtr = &recvfds;
+        } else {
+            FD_SET(sockfd, &sendfds);
+            sendfdsPtr = &sendfds;
+        }
+
 #ifndef USE_WINDOWS_API
+        /* The interrupt pipe read end is always monitored for
+         * readability, even when waiting for the socket to become
+         * writable. Otherwise SSLSocket.close() from another thread
+         * could not interrupt a blocked send. */
         if ((shutdown == 0) && (appData->interruptFds[0] != -1)) {
             if (appData->interruptFds[0] >= FD_SETSIZE) {
                 return WOLFJNI_IO_EVENT_ERROR;
             }
-            FD_SET(appData->interruptFds[0], &fds);
+            FD_SET(appData->interruptFds[0], &recvfds);
+            recvfdsPtr = &recvfds;
             /* nfds should be set to the highest number descriptor plus 1 */
             if (appData->interruptFds[0] > sockfd) {
                 nfds = appData->interruptFds[0] + 1;
@@ -881,36 +895,22 @@ static int socketSelect(SSLAppData* appData, int sockfd, int timeout_ms, int rx,
         FD_ZERO(&errfds);
         FD_SET(sockfd, &errfds);
 
-        if (rx) {
-            recvfds = &fds;
-        } else {
-            sendfds = &fds;
-        }
-
         incrementThreadPollCount(appData);
         if (timeout_ms == 0) {
-            result = select(nfds, recvfds, sendfds, &errfds, NULL);
+            result = select(nfds, recvfdsPtr, sendfdsPtr, &errfds, NULL);
         } else {
-            result = select(nfds, recvfds, sendfds, &errfds, &timeout);
+            result = select(nfds, recvfdsPtr, sendfdsPtr, &errfds, &timeout);
         }
         decrementThreadPollCount(appData);
 
         if (result == 0) {
             return WOLFJNI_IO_EVENT_TIMEOUT;
         } else if (result > 0) {
-            if (FD_ISSET(sockfd, &fds)) {
-                if (rx) {
-                    return WOLFJNI_IO_EVENT_RECV_READY;
-                } else {
-                    return WOLFJNI_IO_EVENT_SEND_READY;
-                }
-            }
-            else if (FD_ISSET(sockfd, &errfds)) {
-                return WOLFJNI_IO_EVENT_ERROR;
-            }
 #ifndef USE_WINDOWS_API
-            else if ((shutdown == 0) && (appData->interruptFds[0] != -1) &&
-                     (FD_ISSET(appData->interruptFds[0], &fds))) {
+            /* Check the interrupt descriptor first, matching the
+             * priority used by the socketPoll() implementation */
+            if ((shutdown == 0) && (appData->interruptFds[0] != -1) &&
+                (FD_ISSET(appData->interruptFds[0], &recvfds))) {
                 /* We got interrupted by our interrupt fd, due to a Java
                  * thread calling SSLSocket.close(). Try to read byte that
                  * was placed on our interruptFds[0] descriptor, but not
@@ -925,6 +925,15 @@ static int socketSelect(SSLAppData* appData, int sockfd, int timeout_ms, int rx,
                 return WOLFJNI_IO_EVENT_FD_CLOSED;
             }
 #endif /* !USE_WINDOWS_API */
+            if (rx && FD_ISSET(sockfd, &recvfds)) {
+                return WOLFJNI_IO_EVENT_RECV_READY;
+            }
+            else if (!rx && FD_ISSET(sockfd, &sendfds)) {
+                return WOLFJNI_IO_EVENT_SEND_READY;
+            }
+            else if (FD_ISSET(sockfd, &errfds)) {
+                return WOLFJNI_IO_EVENT_ERROR;
+            }
         }
 
 #ifndef USE_WINDOWS_API
