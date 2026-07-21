@@ -70,6 +70,7 @@ jobs:
             shasum -a 256 | cut -c1-16)
           KEY="wolfssl-m32-${{ runner.os }}-${{ runner.arch }}"
           KEY="$KEY-$SHA-$CFG_HASH"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached wolfSSL install
@@ -79,11 +80,16 @@ jobs:
           path: wolfssl-install
           key: ${{ steps.wolfssl-key.outputs.key }}
 
+      # Fetch the exact commit the cache key was computed from so the
+      # key and contents cannot drift if master advances mid-run.
       - name: Clone and build wolfSSL (32-bit)
         if: steps.cache-wolfssl.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://github.com/wolfSSL/wolfssl.git /tmp/wolfssl
+          git init /tmp/wolfssl
           cd /tmp/wolfssl
+          git fetch --depth 1 https://github.com/wolfSSL/wolfssl.git \
+            ${{ steps.wolfssl-key.outputs.sha }}
+          git checkout FETCH_HEAD
           ./autogen.sh
           ./configure ${{ matrix.wolfssl_configure }} \
             --prefix=$GITHUB_WORKSPACE/wolfssl-install \

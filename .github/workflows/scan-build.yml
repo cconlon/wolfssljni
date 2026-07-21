@@ -41,6 +41,7 @@ jobs:
           CFG_HASH=$(printf '%s' "$WOLFSSL_CONFIGURE" | \
             shasum -a 256 | cut -c1-16)
           KEY="wolfssl-${{ runner.os }}-${{ runner.arch }}-$SHA-$CFG_HASH"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached wolfSSL install
@@ -50,13 +51,15 @@ jobs:
           path: build-dir
           key: ${{ steps.wolfssl-key.outputs.key }}
 
-      # Build native wolfSSL
+      # Build native wolfSSL, using the exact commit the cache key was
+      # computed from so the key and contents cannot drift if master
+      # advances mid-run.
       - name: Build native wolfSSL
         if: steps.cache-wolfssl.outputs.cache-hit != 'true'
         uses: wolfSSL/actions-build-autotools-project@v1
         with:
           repository: wolfSSL/wolfssl
-          ref: master
+          ref: ${{ steps.wolfssl-key.outputs.sha }}
           path: wolfssl
           configure: '--enable-jni --enable-all'
           check: false
