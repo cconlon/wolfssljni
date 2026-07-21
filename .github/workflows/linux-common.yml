@@ -25,19 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache JUnit dependencies
-        uses: actions/cache@v4
-        id: cache-junit
-        with:
-          path: junit
-          key: junit-jars-v1
-
-      - name: Download junit-4.13.2.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar
-      - name: Download hamcrest-all-1.3.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/org/hamcrest/hamcrest-all/1.3/hamcrest-all-1.3.jar
+      - name: Setup JUnit
+        uses: ./.github/actions/setup-junit
 
       # Cache the installed wolfSSL build. It depends only on the wolfSSL
       # commit, configure flags, and OS/arch, not on the JDK in use, so
@@ -91,9 +80,6 @@ jobs:
           distribution: ${{ inputs.jdk_distro }}
           java-version: ${{ inputs.jdk_version }}
 
-      - name: Set JUNIT_HOME
-        run: |
-          echo "JUNIT_HOME=$GITHUB_WORKSPACE/junit" >> "$GITHUB_ENV"
       - name: Set LD_LIBRARY_PATH
         run: |
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
