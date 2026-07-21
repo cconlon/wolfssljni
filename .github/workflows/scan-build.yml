@@ -24,24 +24,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-tools
 
-      # Cache Junit JARs
-      - name: Cache Junit JARs
-        uses: actions/cache@v3
-        id: cache-junit
-        with:
-          path: ${{ github.workspace }}/junit
-          key: junit-cache-${{ runner.os }}-junit-4.13.2-hamcrest-1.3
-          restore-keys: |
-            junit-cache-${{ runner.os }}-
-
-      # Download Junit JARs (needed for full build)
-      - name: Download junit-4.13.2.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar
-      - name: Download hamcrest-all-1.3.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/org/hamcrest/hamcrest-all/1.3/hamcrest-all-1.3.jar
-
       # Cache the installed wolfSSL build. The key matches the one built
       # in linux-common.yml for the same configure flags, so this job
       # shares the cache with the main CI matrix.
@@ -96,19 +78,15 @@ jobs:
           distribution: 'zulu'
           java-version: '11'
 
-      - name: Set JUNIT_HOME
-        run: |
-          echo "JUNIT_HOME=$GITHUB_WORKSPACE/junit" >> "$GITHUB_ENV"
-      - name: Set LD_LIBRARY_PATH
-        run: |
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
-
-      # Run scan-build over the native JNI C files
+      # Run scan-build over the native JNI C files. scan-build only
+      # analyzes C compilations, so build the native target alone and
+      # skip the Java side of the default make target. JUnit jars and
+      # LD_LIBRARY_PATH are not needed since no tests run here.
       - name: Run scan-build
         env:
           PREFIX: ${{ github.workspace }}/build-dir
         run: |
-          scan-build --status-bugs -o scan-build-reports make
+          scan-build --status-bugs -o scan-build-reports make native
 
       # Upload scan-build results as artifacts
       - name: Upload scan-build results
