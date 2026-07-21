@@ -63,7 +63,7 @@ jobs:
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
 
       - name: Build JNI library
-        run: CFLAGS=${{ inputs.javah_cflags }} ./java.sh $GITHUB_WORKSPACE/build-dir
+        run: CFLAGS="${{ inputs.javash_cflags }}" ./java.sh $GITHUB_WORKSPACE/build-dir
       - name: Build JAR (ant)
         run: ant
       - name: Run Java tests (ant test)
