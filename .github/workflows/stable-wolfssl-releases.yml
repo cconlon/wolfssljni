@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # First job: dynamically fetch the last 3 stable wolfSSL release tags
+  # First job: dynamically fetch the last 5 stable wolfSSL release tags
   get-stable-releases:
     runs-on: ubuntu-latest
     outputs:
