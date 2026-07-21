@@ -2521,13 +2521,20 @@ public class WolfSSLTrustX509Test {
 
     }
 
+    /**
+     * Verify checkServerTrusted() keeps whatever cert is at certs[0] as the
+     * peer/leaf and does not re-select a different leaf from deeper in the
+     * chain by BasicConstraints. In a real handshake certs[0] is the peer
+     * end-entity cert, delivered first by native wolfSSL and required first
+     * by the X509TrustManager contract, so the verified chain starts with it.
+     *
+     * To confirm no re-selection happens, this test intentionally places a
+     * CA cert at certArray[0] and a different end-entity cert (server-int-ecc)
+     * deeper in the chain. The verified chain must start with certArray[0] and
+     * must not promote the deeper end-entity cert to index 0.
+     */
     @Test
-    public void testExtendedKeyUsageWithLeafNotFirst() throws Exception {
-
-        /* This test reproduces the case where a certificate chain arrives
-         * with CA before leaf cert and helps verify the peer chain sorting
-         * logic. It exercises a common code path to validate the Extended
-         * Key Usage as a sanity check. */
+    public void testCheckServerTrustedDoesNotReorderLeaf() throws Exception {
 
         String eccServerCert =
             "examples/certs/intermediate/server-int-ecc-cert.pem";
@@ -2546,27 +2553,25 @@ public class WolfSSLTrustX509Test {
             eccIntCaCert = "/data/local/tmp/" + eccIntCaCert;
         }
 
-        /* Load certificates in REVERSE order (CA first, server last)
-         * to simulate the bug scenario */
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
 
-        /* certArray[0]: Intermediate2 CA - has CA:TRUE, no serverAuth EKU */
-        fis = new FileInputStream(eccInt2CaCert);
-        bis = new java.io.BufferedInputStream(fis);
+        /* certArray[0]: intermediate CA, a CA-flagged cert at index 0 */
+        fis = new FileInputStream(eccIntCaCert);
+        bis = new BufferedInputStream(fis);
         certArray[0] = (X509Certificate)cf.generateCertificate(bis);
         bis.close();
         fis.close();
 
-        /* certArray[1]: Intermediate CA - has CA:TRUE, no serverAuth EKU */
-        fis = new FileInputStream(eccIntCaCert);
-        bis = new java.io.BufferedInputStream(fis);
+        /* certArray[1]: a different trusted end-entity leaf, placed deeper */
+        fis = new FileInputStream(eccServerCert);
+        bis = new BufferedInputStream(fis);
         certArray[1] = (X509Certificate)cf.generateCertificate(bis);
         bis.close();
         fis.close();
 
-        /* certArray[2]: Server cert - has CA:FALSE, HAS serverAuth EKU */
-        fis = new FileInputStream(eccServerCert);
-        bis = new java.io.BufferedInputStream(fis);
+        /* certArray[2]: intermediate2 CA */
+        fis = new FileInputStream(eccInt2CaCert);
+        bis = new BufferedInputStream(fis);
         certArray[2] = (X509Certificate)cf.generateCertificate(bis);
         bis.close();
         fis.close();
@@ -2576,56 +2581,31 @@ public class WolfSSLTrustX509Test {
             tf.caJKS, provider);
         WolfSSLTrustX509 wolfTm = (WolfSSLTrustX509) baseTm[0];
 
-        /* Call checkServerTrusted() with chain-returning overload.
-         * The sorting logic code should:
-         * 1. Identify the leaf using BasicConstraints (index 2)
-         * 2. Move server cert to index 0
-         * 3. Return chain with server cert first */
-        List<X509Certificate> sortedChain = null;
+        /* Chain-returning overload lets us inspect the validated leaf */
+        List<X509Certificate> verifiedChain = null;
         try {
-            sortedChain = wolfTm.checkServerTrusted(
-                certArray, "EC", (String)null);
+            verifiedChain = wolfTm.checkServerTrusted(certArray, "EC",
+                (String)null);
 
         } catch (CertificateException e) {
             e.printStackTrace();
             fail("checkServerTrusted() threw exception: " + e.getMessage());
         }
 
-        /* Validate Extended Key Usage on the peer cert.
-         * The peer cert should be first in the sorted chain. */
-        if (sortedChain == null || sortedChain.size() == 0) {
-            fail("Sorted chain is null or empty");
+        if (verifiedChain == null || verifiedChain.size() == 0) {
+            fail("Verified chain is null or empty");
         }
 
-        X509Certificate peerCert = sortedChain.get(0);
-        List<String> ekuOids = null;
+        /* Cert at the peer position must be certArray[0] */
+        X509Certificate verifiedPeer = verifiedChain.get(0);
 
-        try {
-            ekuOids = peerCert.getExtendedKeyUsage();
+        assertEquals("checkServerTrusted() must keep certArray[0] at the " +
+            "peer position and not re-select a different leaf from the chain",
+            certArray[0], verifiedPeer);
 
-        } catch (java.security.cert.CertificateParsingException e) {
-            e.printStackTrace();
-            fail("Failed to parse Extended Key Usage: " + e.getMessage());
-        }
-
-        /* Check for serverAuth EKU (1.3.6.1.5.5.7.3.1) */
-        boolean hasServerAuth = false;
-        if (ekuOids != null) {
-            for (String oid : ekuOids) {
-                if (oid.equals("1.3.6.1.5.5.7.3.1")) {
-                    hasServerAuth = true;
-                    break;
-                }
-            }
-        }
-
-        if (!hasServerAuth) {
-            fail("EKU validation failed. The certificate chain was not " +
-                 "properly sorted, and a CA cert (without serverAuth EKU) " +
-                 "was treated as the peer cert instead of the server cert. " +
-                 "Peer cert: " + peerCert.getSubjectX500Principal() +
-                ", EKU list: " + ekuOids);
-        }
+        assertNotEquals("checkServerTrusted() must not promote a different " +
+            "end-entity cert from deeper in the chain to the peer position",
+            certArray[1], verifiedPeer);
     }
 
     /**
