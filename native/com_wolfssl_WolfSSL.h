@@ -847,6 +847,14 @@ JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_RsaEnabled
 
 /*
  * Class:     com_wolfssl_WolfSSL
+ * Method:    DhEnabled
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL Java_com_wolfssl_WolfSSL_DhEnabled
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_wolfssl_WolfSSL
  * Method:    RsaPssEnabled
  * Signature: ()Z
  */

@@ -270,28 +270,46 @@ public class WolfSSLContext extends SSLContextSpi {
     private void enforceKeySizeLimitations() throws WolfSSLException {
 
         int minKeySize = 0;
-        int ret = 0;
 
         minKeySize = WolfSSLUtil.getDisabledAlgorithmsKeySizeLimit("RSA");
-        ret = this.ctx.setMinRSAKeySize(minKeySize);
-        if (ret != WolfSSL.SSL_SUCCESS) {
-            throw new WolfSSLException(
-                "Error setting SSLContext min RSA key size");
-        }
+        checkMinKeySizeResult("RSA", this.ctx.setMinRSAKeySize(minKeySize));
 
         minKeySize = WolfSSLUtil.getDisabledAlgorithmsKeySizeLimit("EC");
-        ret = this.ctx.setMinECCKeySize(minKeySize);
-        if (ret != WolfSSL.SSL_SUCCESS) {
-            throw new WolfSSLException(
-                "Error setting SSLContext min ECC key size");
-        }
+        checkMinKeySizeResult("ECC", this.ctx.setMinECCKeySize(minKeySize));
 
         minKeySize = WolfSSLUtil.getDisabledAlgorithmsKeySizeLimit("DH");
-        ret = this.ctx.setMinDHKeySize(minKeySize);
-        if (ret != WolfSSL.SSL_SUCCESS) {
-            throw new WolfSSLException(
-                "Error setting SSLContext min DH key size");
+        checkMinKeySizeResult("DH", this.ctx.setMinDHKeySize(minKeySize));
+    }
+
+    /**
+     * Check the return value from a native setMin*KeySize() call.
+     *
+     * NOT_COMPILED_IN means the algorithm is not compiled into the native
+     * wolfSSL library (ex: NO_DH in a FIPS build), so there is no key
+     * exchange of that type to restrict and no minimum to set. That is not
+     * an error.
+     *
+     * @param algo algorithm name for the error message (RSA, ECC, or DH)
+     * @param ret return value from the native setMin*KeySize() call
+     *
+     * @throws WolfSSLException if the minimum key size failed to set
+     */
+    private void checkMinKeySizeResult(String algo, int ret)
+        throws WolfSSLException {
+
+        if (ret == WolfSSL.SSL_SUCCESS) {
+            return;
         }
+
+        if (ret == WolfSSL.NOT_COMPILED_IN) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                () -> algo + " not compiled into native wolfSSL, no min " +
+                "key size to set");
+            return;
+        }
+
+        throw new WolfSSLException(
+            "Error setting SSLContext min " + algo + " key size");
     }
 
     private void LoadTrustedRootCerts() {
