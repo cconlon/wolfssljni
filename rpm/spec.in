@@ -3,7 +3,7 @@ Version:        @VERSION@
 Release:        1
 Summary:        wolfSSL JSSE Provider and JNI Wrapper
 
-License:        GPLv2
+License:        GPLv3
 URL:            http://www.wolfssl.com/
 Source0:        @NAME@-@VERSION@.tar.gz
 
