@@ -1128,6 +1128,13 @@ public class WolfSSL {
     public static native boolean RsaEnabled();
 
     /**
+     * Tests if DH support has been compiled into the native wolfSSL library.
+     *
+     * @return true if enabled, otherwise false if not compiled in.
+     */
+    public static native boolean DhEnabled();
+
+    /**
      * Tests if RSA_PSS support has been compiled into the native wolfSSL
      * library.
      *

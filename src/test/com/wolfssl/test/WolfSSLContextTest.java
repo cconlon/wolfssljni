@@ -652,6 +652,13 @@ public class WolfSSLContextTest {
 
         int ret = 0;
 
+        /* If DH is not compiled into native wolfSSL (ex: FIPS NO_DH),
+         * setMinDHKeySize() returns NOT_COMPILED_IN in that case */
+        if (!WolfSSL.DhEnabled()) {
+            assertEquals(WolfSSL.NOT_COMPILED_IN, ctx.setMinDHKeySize(1024));
+            return;
+        }
+
         try {
             /* key length > 16000 should fail */
             ret = ctx.setMinDHKeySize(17000);
