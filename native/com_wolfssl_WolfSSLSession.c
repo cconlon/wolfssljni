@@ -3677,13 +3677,17 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useCertificateBuffer
         return SSL_FAILURE;
     }
 
-    buff = (unsigned char*)XMALLOC((int)sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    if (sz <= 0 || sz > (jlong)(*jenv)->GetArrayLength(jenv, in)) {
+        return BAD_FUNC_ARG;
+    }
+
+    buff = (unsigned char*)XMALLOC((word32)sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
     if (buff == NULL) {
         return MEMORY_E;
     }
-    XMEMSET(buff, 0, (int)sz);
+    XMEMSET(buff, 0, (word32)sz);
 
-    (*jenv)->GetByteArrayRegion(jenv, in, 0, (long)sz, (jbyte*)buff);
+    (*jenv)->GetByteArrayRegion(jenv, in, 0, (jsize)sz, (jbyte*)buff);
     if ((*jenv)->ExceptionOccurred(jenv)) {
         (*jenv)->ExceptionDescribe(jenv);
         (*jenv)->ExceptionClear(jenv);
@@ -3717,13 +3721,17 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_usePrivateKeyBuffer
         return SSL_FAILURE;
     }
 
-    buff = (unsigned char*)XMALLOC((long)sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    if (sz <= 0 || sz > (jlong)(*jenv)->GetArrayLength(jenv, in)) {
+        return BAD_FUNC_ARG;
+    }
+
+    buff = (unsigned char*)XMALLOC((word32)sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
     if (buff == NULL) {
         return MEMORY_E;
     }
-    XMEMSET(buff, 0, (long)sz);
+    XMEMSET(buff, 0, (word32)sz);
 
-    (*jenv)->GetByteArrayRegion(jenv, in, 0, (long)sz, (jbyte*)buff);
+    (*jenv)->GetByteArrayRegion(jenv, in, 0, (jsize)sz, (jbyte*)buff);
     if ((*jenv)->ExceptionOccurred(jenv)) {
         (*jenv)->ExceptionDescribe(jenv);
         (*jenv)->ExceptionClear(jenv);
@@ -3733,7 +3741,7 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_usePrivateKeyBuffer
 
     ret = wolfSSL_use_PrivateKey_buffer(ssl, buff, (long)sz, format);
 
-    XMEMSET(buff, 0, (long)sz);
+    XMEMSET(buff, 0, (word32)sz);
     XFREE(buff, NULL, DYNAMIC_TYPE_TMP_BUFFER);
 
     return ret;
@@ -3758,13 +3766,17 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSLSession_useCertificateChainBuffer
         return SSL_FAILURE;
     }
 
-    buff = (unsigned char*)XMALLOC((long)sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    if (sz <= 0 || sz > (jlong)(*jenv)->GetArrayLength(jenv, in)) {
+        return BAD_FUNC_ARG;
+    }
+
+    buff = (unsigned char*)XMALLOC((word32)sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
     if (buff == NULL) {
         return MEMORY_E;
     }
-    XMEMSET(buff, 0, (long)sz);
+    XMEMSET(buff, 0, (word32)sz);
 
-    (*jenv)->GetByteArrayRegion(jenv, in, 0, (long)sz, (jbyte*)buff);
+    (*jenv)->GetByteArrayRegion(jenv, in, 0, (jsize)sz, (jbyte*)buff);
     if ((*jenv)->ExceptionOccurred(jenv)) {
         (*jenv)->ExceptionDescribe(jenv);
         (*jenv)->ExceptionClear(jenv);
