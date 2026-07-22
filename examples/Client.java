@@ -446,6 +446,11 @@ public class Client {
                 sslCtx.setRsaDecCb(rsaDec);
             }
 
+            /* Verify the peer hostname for non-loopback hosts. The example
+             * certs carry no loopback name. */
+            boolean checkDomain = (verifyPeer != 0) &&
+                !InetAddress.getByName(host).isLoopbackAddress();
+
             if (benchmark != 0) {
                 int times = benchmark;
                 int i = 0;
@@ -465,6 +470,15 @@ public class Client {
                     instream = new DataInputStream(sock.getInputStream());
                     ssl = new WolfSSLSession(sslCtx);
                     ssl.setFd(sock);
+
+                    if (checkDomain) {
+                        ret = ssl.checkDomainName(host);
+                        if (ret != WolfSSL.SSL_SUCCESS) {
+                            System.out.println(
+                                "failed to set domain name check!");
+                            System.exit(1);
+                        }
+                    }
 
                     do {
                         ret = ssl.connect();
@@ -648,6 +662,14 @@ public class Client {
                 ssl.setRsaDecCtx(rsaDecCtx);
             }
 
+            if (checkDomain) {
+                ret = ssl.checkDomainName(host);
+                if (ret != WolfSSL.SSL_SUCCESS) {
+                    System.out.println("failed to set domain name check!");
+                    System.exit(1);
+                }
+            }
+
             /* call wolfSSL_connect */
             do {
                 ret = ssl.connect();
@@ -821,6 +843,15 @@ public class Client {
 
                 /* restore saved WOLFSSL_SESSION */
                 ssl.setSession(session);
+
+                if (checkDomain) {
+                    ret = ssl.checkDomainName(host);
+                    if (ret != WolfSSL.SSL_SUCCESS) {
+                        System.out.println(
+                            "failed to set domain name check!");
+                        System.exit(1);
+                    }
+                }
 
                 /* call wolfSSL_connect */
                 do {
