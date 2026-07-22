@@ -2138,8 +2138,6 @@ public class WolfSSLSocket extends SSLSocket {
                             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                                 () -> "thread got handshakeLock");
 
-                            this.connectionClosed = true;
-
                             /* Release native verify callback (JNI global) */
                             if (this.EngineHelper != null) {
                                 this.EngineHelper.unsetVerifyCallback();
@@ -2214,6 +2212,12 @@ public class WolfSSLSocket extends SSLSocket {
                                 ", streams not closed, or active operations: " +
                                 activeOperations.get());
                         }
+                    }
+
+                    /* Mark closed on every teardown path, before clearing
+                     * EngineHelper, so a later startHandshake() won't NPE. */
+                    synchronized (handshakeLock) {
+                        this.connectionClosed = true;
                     }
 
                     /* Reset internal WolfSSLEngineHelper to null */
