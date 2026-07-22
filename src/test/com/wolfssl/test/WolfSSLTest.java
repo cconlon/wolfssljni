@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.wolfssl.WolfSSL;
 import com.wolfssl.WolfSSLException;
 import com.wolfssl.WolfSSLLoggingCallback;
+import com.wolfssl.WolfSSLFIPSErrorCallback;
 
 /* suppress SSLv3 deprecation warnings, meant for end user not tests */
 @SuppressWarnings("deprecation")
@@ -697,5 +698,34 @@ public class WolfSSLTest {
         /* No message means this build compiled out trace logging, skip. */
         Assume.assumeTrue("no trace messages emitted by this build",
             TestLoggingCallback.count.get() > 0);
+    }
+
+    /* FIPS error callback used by the setFIPSCb test. */
+    static class TestFIPSErrorCallback implements WolfSSLFIPSErrorCallback {
+        public void errorCallback(int ok, int err, String hash) {
+        }
+    }
+
+    /* setFIPSCb() must register, re-register (freeing prior global ref under
+     * the FIPS callback mutex), and deregister without error. */
+    @Test
+    public void test_WolfSSL_setFIPSCb() {
+
+        int ret = WolfSSL.setFIPSCb(new TestFIPSErrorCallback());
+        if (ret != WolfSSL.SSL_SUCCESS && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail("WolfSSL.setFIPSCb() returned unexpected value: " + ret);
+        }
+
+        /* re-register a different callback, releases the prior ref */
+        ret = WolfSSL.setFIPSCb(new TestFIPSErrorCallback());
+        if (ret != WolfSSL.SSL_SUCCESS && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail("WolfSSL.setFIPSCb() re-register returned: " + ret);
+        }
+
+        /* deregister for other tests */
+        ret = WolfSSL.setFIPSCb(null);
+        if (ret != WolfSSL.SSL_SUCCESS && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail("WolfSSL.setFIPSCb(null) returned: " + ret);
+        }
     }
 }
