@@ -66,7 +66,7 @@ public class MultiThreadedSSLServer
             /* Set up CA TrustManagerFactory */
             KeyStore caKeyStore = KeyStore.getInstance("JKS");
             caKeyStore.load(new FileInputStream(serverTS), psw);
-            
+
             TrustManagerFactory tm = TrustManagerFactory
                 .getInstance("SunX509", jsseProv);
             tm.init(caKeyStore);
@@ -76,6 +76,10 @@ public class MultiThreadedSSLServer
 
             SSLServerSocket ss = (SSLServerSocket)ctx
                 .getServerSocketFactory().createServerSocket(serverPort);
+
+            /* Require client authentication, the ca-client.jks trust store
+             * loaded above validates the client certificate. */
+            ss.setNeedClientAuth(true);
 
             while (true) {
                 SSLSocket sock = (SSLSocket)ss.accept();
