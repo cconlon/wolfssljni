@@ -49,7 +49,6 @@ import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.nio.charset.StandardCharsets;
 
 /**
  * Helper class used to store common settings, objects, etc.
@@ -67,6 +66,9 @@ public class WolfSSLAuthStore {
 
     private SessionStore<String, WolfSSLImplementSSLSession> store = null;
     private static final Object storeLock = new Object();
+
+    /* Pseudo session ID length in bytes */
+    private static final int PSEUDO_SESSION_ID_LEN = 32;
 
     /**
      * Protected constructor to create new WolfSSLAuthStore
@@ -230,6 +232,21 @@ public class WolfSSLAuthStore {
      */
     protected SecureRandom getSecureRandom() {
         return this.sr;
+    }
+
+    /**
+     * Generate a random pseudo session ID.
+     *
+     * Used as the SSLSession ID for TLS 1.3 and session-ticket sessions,
+     * which have no traditional session ID. SecureRandom gives each session
+     * a distinct ID, keeping SSLSessionContext.getSession(byte[]) unique.
+     *
+     * @return newly generated pseudo session ID
+     */
+    private byte[] generatePseudoSessionId() {
+        byte[] id = new byte[PSEUDO_SESSION_ID_LEN];
+        getSecureRandom().nextBytes(id);
+        return id;
     }
 
     /**
@@ -403,8 +420,7 @@ public class WolfSSLAuthStore {
             ses.setValid(true); /* new sessions marked as valid */
 
             ses.isFromTable = false;
-            ses.setPseudoSessionId(Integer.toString(ssl.hashCode())
-                .getBytes(StandardCharsets.UTF_8));
+            ses.setPseudoSessionId(generatePseudoSessionId());
         }
         else {
             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
@@ -420,8 +436,7 @@ public class WolfSSLAuthStore {
                 ses = new WolfSSLImplementSSLSession(ssl, port, host, this);
                 ses.setValid(true);
                 ses.isFromTable = false;
-                ses.setPseudoSessionId(Integer.toString(ssl.hashCode())
-                    .getBytes(StandardCharsets.UTF_8));
+                ses.setPseudoSessionId(generatePseudoSessionId());
             }
         }
 
@@ -567,8 +582,7 @@ public class WolfSSLAuthStore {
 
         ses.setValid(true);
         ses.isFromTable = false;
-        ses.setPseudoSessionId(Integer.toString(ssl.hashCode())
-            .getBytes(StandardCharsets.UTF_8));
+        ses.setPseudoSessionId(generatePseudoSessionId());
 
         return ses;
     }

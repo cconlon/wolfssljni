@@ -42,6 +42,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -133,6 +135,8 @@ import com.wolfssl.WolfSSLException;
     public void testSocketConnectException();
     public void testSocketCloseInterruptsWrite();
     public void testSocketCloseInterruptsRead();
+    public void testSocketCloseDuringConcurrentWrite();
+    public void testSocketCloseDuringConcurrentRead();
     public void testSSLHandshakeExceptionCauseChain();
  */
 public class WolfSSLSocketTest {
@@ -3522,8 +3526,7 @@ public class WolfSSLSocketTest {
                 String msg = e.getMessage();
                 if (msg == null ||
                     (!msg.contains("Socket is closed") &&
-                     !msg.contains("Connection already shutdown") &&
-                     !msg.contains("object has been freed"))) {
+                     !msg.contains("Connection already shutdown"))) {
                     e.printStackTrace();
                     fail("Incorrect SocketException thrown by client");
                     throw e;
@@ -3544,6 +3547,338 @@ public class WolfSSLSocketTest {
             if (!ss.isClosed()) {
                 ss.close();
             }
+        }
+    }
+
+    /* Close a resource, ignoring exceptions, for deterministic
+     * per-iteration cleanup in the stress tests below. */
+    private static void closeQuietly(java.io.Closeable c) {
+        if (c != null) {
+            try {
+                c.close();
+            } catch (Exception e) {
+                /* ignore */
+            }
+        }
+    }
+
+    /* Races close() against OutputStream.write() under CPU load, verifying
+     * write() never uses a WolfSSLSession that close() has freed. Bounded by
+     * iteration count and wall clock budget to keep runtime predictable on
+     * slow CI runners, 120 sec timeout is a backstop. */
+    @Test(timeout = 120000)
+    public void testSocketCloseDuringConcurrentWrite() throws Exception {
+
+        int i;
+        String protocol = null;
+        final int maxIterations = 300;
+        final long budgetMs = 5000;
+
+        /* pipe() interrupt mechanism not implemented for Windows yet since
+         * Windows does not support Unix/Linux pipe(). Re-enable this test
+         * for Windows when that support has been added */
+        Assume.assumeFalse(WolfSSLTestFactory.isWindows());
+
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv13Enabled()) {
+            protocol = "TLSv1.3";
+        }
+        Assume.assumeNotNull(protocol);
+
+        /* create new CTX */
+        this.ctx = tf.createSSLContext(protocol, ctxProvider);
+
+        ExecutorService es = Executors.newCachedThreadPool();
+
+        /* Busy spinners force thread preemption inside write()/close() */
+        final AtomicBoolean spinStop = new AtomicBoolean(false);
+        int numSpin = Runtime.getRuntime().availableProcessors() * 2;
+        for (i = 0; i < numSpin; i++) {
+            Thread spin = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    while (!spinStop.get()) {
+                        /* busy loop to create CPU load */
+                    }
+                }
+            });
+            spin.setDaemon(true);
+            spin.start();
+        }
+
+        try {
+            long startMs = System.currentTimeMillis();
+
+            for (i = 0; (i < maxIterations) &&
+                 ((System.currentTimeMillis() - startMs) < budgetMs);
+                 i++) {
+
+                SSLServerSocket ss = null;
+                Socket plain = null;
+                SSLSocket cs = null;
+                SSLSocket server = null;
+
+                try {
+                    ss = (SSLServerSocket)ctx
+                        .getServerSocketFactory().createServerSocket(0);
+
+                    /* autoClose false keeps underlying Socket open across
+                     * SSLSocket.close() */
+                    plain = new Socket();
+                    plain.connect(new InetSocketAddress("127.0.0.1",
+                        ss.getLocalPort()));
+                    cs = (SSLSocket)ctx.getSocketFactory()
+                        .createSocket(plain, "127.0.0.1",
+                            ss.getLocalPort(), false);
+                    server = (SSLSocket)ss.accept();
+
+                    /* Server thread reads until end of stream or Exception */
+                    final SSLSocket serverConn = server;
+                    Future<Void> serverFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                try {
+                                    serverConn.startHandshake();
+                                    byte[] tmp = new byte[8192];
+                                    InputStream in =
+                                        serverConn.getInputStream();
+                                    while (in.read(tmp) >= 0) {
+                                        /* discard data */
+                                    }
+                                } catch (Exception e) {
+                                    /* expected when connection closed */
+                                }
+                                return null;
+                            }
+                        });
+
+                    cs.startHandshake();
+
+                    final OutputStream out = cs.getOutputStream();
+                    final Throwable[] writeExc = new Throwable[1];
+
+                    /* Writer thread loops until close() causes Exception */
+                    Future<Void> writeFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                byte[] one = new byte[1];
+                                try {
+                                    while (true) {
+                                        out.write(one);
+                                    }
+                                } catch (Throwable t) {
+                                    writeExc[0] = t;
+                                }
+                                return null;
+                            }
+                        });
+
+                    /* sweep delay 0 - ~490 us to vary close() alignment */
+                    LockSupport.parkNanos((i % 50) * 10000L);
+
+                    /* close socket while writer thread is running */
+                    cs.close();
+
+                    writeFuture.get(30, TimeUnit.SECONDS);
+
+                    /* Unblock the server reader before joining it, so a
+                     * lost close_notify cannot stall the iteration */
+                    server.close();
+                    ss.close();
+                    plain.close();
+                    serverFuture.get(30, TimeUnit.SECONDS);
+
+                    /* fail if write() used a freed WolfSSLSession */
+                    Throwable t = writeExc[0];
+                    while (t != null) {
+                        String msg = t.getMessage();
+                        if (msg != null && msg.contains("has been freed")) {
+                            fail("write() used freed WOLFSSL session, " +
+                                "iteration " + i + ": " + t);
+                        }
+                        t = t.getCause();
+                    }
+                }
+                finally {
+                    closeQuietly(cs);
+                    closeQuietly(server);
+                    closeQuietly(ss);
+                    closeQuietly(plain);
+                }
+            }
+        }
+        finally {
+            spinStop.set(true);
+            /* shutdownNow() interrupts tasks left running on a failure or
+             * timeout, awaitTermination() bounds the wait */
+            es.shutdownNow();
+            es.awaitTermination(30, TimeUnit.SECONDS);
+        }
+    }
+
+    /* Races close() against InputStream.read() under CPU load, verifying
+     * read() never uses a WolfSSLSession that close() has freed. Server sends
+     * one byte at a time so read() returns and loops rapidly through its
+     * internal state checks. Bounded by iteration count and wall clock budget
+     * to keep runtime predictable, 120 sec timeout backstop. */
+    @Test(timeout = 120000)
+    public void testSocketCloseDuringConcurrentRead() throws Exception {
+
+        int i;
+        String protocol = null;
+        final int maxIterations = 500;
+        final long budgetMs = 5000;
+
+        /* pipe() interrupt mechanism not implemented for Windows yet since
+         * Windows does not support Unix/Linux pipe(). Re-enable this test
+         * for Windows when that support has been added */
+        Assume.assumeFalse(WolfSSLTestFactory.isWindows());
+
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv13Enabled()) {
+            protocol = "TLSv1.3";
+        }
+        Assume.assumeNotNull(protocol);
+
+        /* create new CTX */
+        this.ctx = tf.createSSLContext(protocol, ctxProvider);
+
+        ExecutorService es = Executors.newCachedThreadPool();
+
+        /* Busy spinners force thread preemption inside read()/close() */
+        final AtomicBoolean spinStop = new AtomicBoolean(false);
+        int numSpin = Runtime.getRuntime().availableProcessors() * 2;
+        for (i = 0; i < numSpin; i++) {
+            Thread spin = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    while (!spinStop.get()) {
+                        /* busy loop to create CPU load */
+                    }
+                }
+            });
+            spin.setDaemon(true);
+            spin.start();
+        }
+
+        try {
+            long startMs = System.currentTimeMillis();
+
+            for (i = 0; (i < maxIterations) &&
+                 ((System.currentTimeMillis() - startMs) < budgetMs);
+                 i++) {
+
+                SSLServerSocket ss = null;
+                Socket plain = null;
+                SSLSocket cs = null;
+                SSLSocket server = null;
+
+                /* Server thread floods data until stopped */
+                final AtomicBoolean serverStop = new AtomicBoolean(false);
+
+                try {
+                    ss = (SSLServerSocket)ctx
+                        .getServerSocketFactory().createServerSocket(0);
+
+                    /* autoClose false keeps underlying Socket open across
+                     * SSLSocket.close() */
+                    plain = new Socket();
+                    plain.connect(new InetSocketAddress("127.0.0.1",
+                        ss.getLocalPort()));
+                    cs = (SSLSocket)ctx.getSocketFactory()
+                        .createSocket(plain, "127.0.0.1",
+                            ss.getLocalPort(), false);
+                    server = (SSLSocket)ss.accept();
+
+                    final SSLSocket serverConn = server;
+                    Future<Void> serverFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                try {
+                                    serverConn.startHandshake();
+                                    byte[] tmp = new byte[1];
+                                    OutputStream out =
+                                        serverConn.getOutputStream();
+                                    while (!serverStop.get()) {
+                                        out.write(tmp);
+                                    }
+                                } catch (Exception e) {
+                                    /* expected when connection closed */
+                                }
+                                return null;
+                            }
+                        });
+
+                    cs.startHandshake();
+
+                    final InputStream in = cs.getInputStream();
+                    final Throwable[] readExc = new Throwable[1];
+
+                    /* Reader thread loops until close() causes Exception */
+                    Future<Void> readFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                byte[] buf = new byte[1];
+                                try {
+                                    while (in.read(buf) >= 0) {
+                                        /* discard data */
+                                    }
+                                } catch (Throwable t) {
+                                    readExc[0] = t;
+                                }
+                                return null;
+                            }
+                        });
+
+                    /* sweep delay 0 - ~490 us to vary close() alignment */
+                    LockSupport.parkNanos((i % 50) * 10000L);
+
+                    /* close socket while reader thread is running */
+                    cs.close();
+
+                    readFuture.get(30, TimeUnit.SECONDS);
+
+                    /* Stop the flooding server thread. Closing the Socket
+                     * breaks TCP so a write() blocked on a full send buffer
+                     * errors out */
+                    serverStop.set(true);
+                    server.close();
+                    ss.close();
+                    plain.close();
+                    serverFuture.get(30, TimeUnit.SECONDS);
+
+                    /* fail if read() used a freed WolfSSLSession */
+                    Throwable t = readExc[0];
+                    while (t != null) {
+                        String msg = t.getMessage();
+                        if (msg != null && msg.contains("has been freed")) {
+                            fail("read() used freed WOLFSSL session, " +
+                                "iteration " + i + ": " + t);
+                        }
+                        t = t.getCause();
+                    }
+                }
+                finally {
+                    serverStop.set(true);
+                    closeQuietly(cs);
+                    closeQuietly(server);
+                    closeQuietly(ss);
+                    closeQuietly(plain);
+                }
+            }
+        }
+        finally {
+            spinStop.set(true);
+            /* shutdownNow() interrupts tasks left running on a failure or
+             * timeout, awaitTermination() bounds the wait */
+            es.shutdownNow();
+            es.awaitTermination(30, TimeUnit.SECONDS);
         }
     }
 
