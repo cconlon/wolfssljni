@@ -54,6 +54,73 @@ JavaVM*  g_vm;
 /* global object refs for logging callbacks */
 static jobject g_loggingCbIfaceObj;
 
+/* Serializes g_loggingCbIfaceObj reads/updates between NativeLoggingCallback
+ * and cleanup()/setLoggingCb(). Init in JNI_OnLoad, freed JNI_OnUnload. */
+static wolfSSL_Mutex g_loggingCbMutex;
+static int g_loggingCbMutexInit = 0;
+
+/* Tracks one-time native registration of NativeLoggingCallback and its return
+ * value. We register once and never deregister: wolfssl_log reads LogFunction
+ * without a lock, so clearing it while another thread logs would crash.
+ * Guarded by g_loggingCbMutex. */
+static int g_loggingCbNativeReg = 0;
+static int g_loggingCbNativeRet = 0;
+
+static int NativeLoggingCbMutexInit(void)
+{
+    if (g_loggingCbMutexInit) {
+        return 0;
+    }
+
+    if (wc_InitMutex(&g_loggingCbMutex) != 0) {
+        return -1;
+    }
+
+    g_loggingCbMutexInit = 1;
+
+    return 0;
+}
+
+static void NativeLoggingCbMutexFree(void)
+{
+    if (g_loggingCbMutexInit) {
+        wc_FreeMutex(&g_loggingCbMutex);
+        g_loggingCbMutexInit = 0;
+    }
+}
+
+static int NativeLoggingCbLock(void)
+{
+    int rc;
+
+    if (!g_loggingCbMutexInit) {
+        return 0;
+    }
+
+    rc = wc_LockMutex(&g_loggingCbMutex);
+    if (rc != 0) {
+        WOLFSSL_MSG("Failed to lock logging callback mutex");
+    }
+
+    return rc;
+}
+
+static int NativeLoggingCbUnlock(void)
+{
+    int rc;
+
+    if (!g_loggingCbMutexInit) {
+        return 0;
+    }
+
+    rc = wc_UnLockMutex(&g_loggingCbMutex);
+    if (rc != 0) {
+        WOLFSSL_MSG("Failed to unlock logging callback mutex");
+    }
+
+    return rc;
+}
+
 /* global method IDs we can cache for performance */
 jmethodID g_sslIORecvMethodId = NULL;
 jmethodID g_sslIORecvMethodId_BB = NULL;
@@ -232,6 +299,13 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved)
         return JNI_ERR;
     }
 
+    /* Initialize the logging callback mutex. */
+    if (NativeLoggingCbMutexInit() != 0) {
+        NativeVerifyCbMutexFree();
+        NativeCrlCbMutexFree();
+        return JNI_ERR;
+    }
+
     return JNI_VERSION_1_6;
 }
 
@@ -256,6 +330,21 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved)
 
     /* Free the missing-CRL callback synchronization mutex. */
     NativeCrlCbMutexFree();
+
+    /* Deregister the native logging callback */
+    if (g_loggingCbNativeReg) {
+        wolfSSL_SetLoggingCb(NULL);
+        g_loggingCbNativeReg = 0;
+    }
+
+    /* Release logging callback global ref. */
+    if (g_loggingCbIfaceObj != NULL) {
+        (*env)->DeleteGlobalRef(env, g_loggingCbIfaceObj);
+        g_loggingCbIfaceObj = NULL;
+    }
+
+    /* Free the logging callback mutex. */
+    NativeLoggingCbMutexFree();
 
     /* Clear cached method ID */
     g_sslIORecvMethodId = NULL;
@@ -1629,6 +1718,7 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSL_cleanup
   (JNIEnv* jenv, jclass jcl)
 {
     int ret = WOLFSSL_SUCCESS;
+    jobject loggingCbPrior = NULL;
     (void)jenv;
     (void)jcl;
 
@@ -1637,9 +1727,13 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSL_cleanup
     ret = wolfSSL_Cleanup();
 
     /* release global logging callback object if registered */
-    if (g_loggingCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_loggingCbIfaceObj);
+    if (NativeLoggingCbLock() == 0) {
+        loggingCbPrior = g_loggingCbIfaceObj;
         g_loggingCbIfaceObj = NULL;
+        (void)NativeLoggingCbUnlock();
+    }
+    if (loggingCbPrior != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, loggingCbPrior);
     }
 
 #ifdef HAVE_FIPS
@@ -1680,6 +1774,8 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSL_setLoggingCb
   (JNIEnv* jenv, jclass jcl, jobject callback)
 {
     int ret = 0;
+    jobject newCbObj = NULL;
+    jobject priorCbObj = NULL;
 
     (void)jcl;
 
@@ -1687,25 +1783,41 @@ JNIEXPORT jint JNICALL Java_com_wolfssl_WolfSSL_setLoggingCb
         return BAD_FUNC_ARG;
     }
 
-    /* release existing logging callback object if registered */
-    if (g_loggingCbIfaceObj != NULL) {
-        (*jenv)->DeleteGlobalRef(jenv, g_loggingCbIfaceObj);
-        g_loggingCbIfaceObj = NULL;
-    }
-
     if (callback != NULL) {
         /* store Java logging callback Interface object */
-        g_loggingCbIfaceObj = (*jenv)->NewGlobalRef(jenv, callback);
-        if (g_loggingCbIfaceObj == NULL) {
+        newCbObj = (*jenv)->NewGlobalRef(jenv, callback);
+        if (newCbObj == NULL) {
             printf("error storing global logging callback interface\n");
             return SSL_FAILURE;
         }
-
-        ret = wolfSSL_SetLoggingCb(NativeLoggingCallback);
     }
-    else {
-        /* reset back to null */
-        ret = wolfSSL_SetLoggingCb(NULL);
+
+    /* Swap in new ref and register NativeLoggingCallback once */
+    if (NativeLoggingCbLock() != 0) {
+        /* Lock failed, free the new global ref and ret without unlocking */
+        if (newCbObj != NULL) {
+            (*jenv)->DeleteGlobalRef(jenv, newCbObj);
+        }
+        return SSL_FAILURE;
+    }
+    priorCbObj = g_loggingCbIfaceObj;
+    g_loggingCbIfaceObj = newCbObj;
+    if (!g_loggingCbNativeReg) {
+        if (newCbObj != NULL) {
+            g_loggingCbNativeRet = wolfSSL_SetLoggingCb(NativeLoggingCallback);
+            g_loggingCbNativeReg = 1;
+        }
+        else {
+            /* Clearing before any registration. */
+            g_loggingCbNativeRet = wolfSSL_SetLoggingCb(NULL);
+        }
+    }
+    ret = g_loggingCbNativeRet;
+    (void)NativeLoggingCbUnlock();
+
+    /* free prior ref outside the lock */
+    if (priorCbObj != NULL) {
+        (*jenv)->DeleteGlobalRef(jenv, priorCbObj);
     }
 
     return ret;
@@ -1728,6 +1840,7 @@ void NativeLoggingCallback(const int logLevel, const char *const logMessage)
     jstring   logMsg;
     int       needsDetach = 0;  /* Should we explicitly detach? */
     jobjectRefType refcheck;
+    jobject   localCbObj = NULL;
 
     /* get JNIEnv from JavaVM */
     vmret = (int)((*g_vm)->GetEnv(g_vm, (void**) &jenv, JNI_VERSION_1_6));
@@ -1744,27 +1857,36 @@ void NativeLoggingCallback(const int logLevel, const char *const logMessage)
         return;
     }
 
-    /* if g_loggingCbIfaceObj has been released (part of wolfSSL_Cleanup()),
-     * just return and skip this log */
-    if (g_loggingCbIfaceObj == NULL) {
+    /* Store global into local ref under mutex so a concurrent cleanup() or
+     * setLoggingCb() can't free it while we call into Java. */
+    if (NativeLoggingCbLock() == 0) {
+        if (g_loggingCbIfaceObj != NULL) {
+            localCbObj = (*jenv)->NewLocalRef(jenv, g_loggingCbIfaceObj);
+        }
+        (void)NativeLoggingCbUnlock();
+    }
+
+    /* callback released (part of wolfSSL_Cleanup()), skip this log */
+    if (localCbObj == NULL) {
         if (needsDetach == 1) {
             (*g_vm)->DetachCurrentThread(g_vm);
         }
         return;
     }
 
-    /* check if our stored object reference is valid */
-    refcheck = (*jenv)->GetObjectRefType(jenv, g_loggingCbIfaceObj);
-    if (refcheck == 2) {
+    /* Defensive check on localCbObj ref validity */
+    refcheck = (*jenv)->GetObjectRefType(jenv, localCbObj);
+    if (refcheck != JNIInvalidRefType) {
 
-        /* lookup WolfSSLLoggingCallback class from global object ref */
-        logClass = (*jenv)->GetObjectClass(jenv, g_loggingCbIfaceObj);
+        /* lookup WolfSSLLoggingCallback class from object ref */
+        logClass = (*jenv)->GetObjectClass(jenv, localCbObj);
         if (!logClass) {
             if ((*jenv)->ExceptionOccurred(jenv)) {
                 (*jenv)->ExceptionDescribe(jenv);
                 (*jenv)->ExceptionClear(jenv);
             }
 
+            (*jenv)->DeleteLocalRef(jenv, localCbObj);
             if (needsDetach == 1) {
                 (*g_vm)->DetachCurrentThread(g_vm);
             }
@@ -1774,11 +1896,14 @@ void NativeLoggingCallback(const int logLevel, const char *const logMessage)
         logMethod = (*jenv)->GetMethodID(jenv, logClass,
                                             "loggingCallback",
                                             "(ILjava/lang/String;)V");
+        /* done with logClass, release it now */
+        (*jenv)->DeleteLocalRef(jenv, logClass);
         if (logMethod == 0) {
             if ((*jenv)->ExceptionOccurred(jenv)) {
                 (*jenv)->ExceptionDescribe(jenv);
                 (*jenv)->ExceptionClear(jenv);
             }
+            (*jenv)->DeleteLocalRef(jenv, localCbObj);
             if (needsDetach == 1) {
                 (*g_vm)->DetachCurrentThread(g_vm);
             }
@@ -1788,8 +1913,11 @@ void NativeLoggingCallback(const int logLevel, const char *const logMessage)
         /* create jstring from char* */
         logMsg = (*jenv)->NewStringUTF(jenv, logMessage);
 
-        (*jenv)->CallVoidMethod(jenv, g_loggingCbIfaceObj, logMethod,
+        (*jenv)->CallVoidMethod(jenv, localCbObj, logMethod,
                 logLevel, logMsg);
+
+        /* done with logMsg, release it now */
+        (*jenv)->DeleteLocalRef(jenv, logMsg);
 
         if ((*jenv)->ExceptionOccurred(jenv)) {
             (*jenv)->ExceptionDescribe(jenv);
@@ -1799,6 +1927,7 @@ void NativeLoggingCallback(const int logLevel, const char *const logMessage)
              * Otherwise, our non-important exception here could cause
              * bad things to happen at the Java level - ie, causing the
              * certificate verify callback to fail unnecessarily. */
+            (*jenv)->DeleteLocalRef(jenv, localCbObj);
             if (needsDetach == 1) {
                 (*g_vm)->DetachCurrentThread(g_vm);
             }
@@ -1807,6 +1936,7 @@ void NativeLoggingCallback(const int logLevel, const char *const logMessage)
 
     }
 
+    (*jenv)->DeleteLocalRef(jenv, localCbObj);
     if (needsDetach == 1) {
         (*g_vm)->DetachCurrentThread(g_vm);
     }

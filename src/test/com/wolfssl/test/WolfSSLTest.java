@@ -31,9 +31,12 @@ import static org.junit.Assert.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.wolfssl.WolfSSL;
 import com.wolfssl.WolfSSLException;
+import com.wolfssl.WolfSSLLoggingCallback;
 
 /* suppress SSLv3 deprecation warnings, meant for end user not tests */
 @SuppressWarnings("deprecation")
@@ -576,5 +579,123 @@ public class WolfSSLTest {
         if (mlkem || mldsa || oldIds) {
             /* nothing */
         }
+    }
+
+    /* Logging callback used by the setLoggingCb test. Uses a shared static
+     * counter so invocations across swapped instances accumulate. */
+    static class TestLoggingCallback implements WolfSSLLoggingCallback {
+        static final AtomicLong count = new AtomicLong(0);
+        public void loggingCallback(int logLevel, String logMessage) {
+            count.incrementAndGet();
+        }
+    }
+
+    @Test
+    public void test_WolfSSL_setLoggingCb() throws InterruptedException {
+
+        int ret;
+
+        /* Return is SSL_ERROR_NONE on a debug build, else NOT_COMPILED_IN. */
+        ret = WolfSSL.setLoggingCb(new TestLoggingCallback());
+        if (ret != WolfSSL.SSL_ERROR_NONE && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail("WolfSSL.setLoggingCb() returned unexpected value: " + ret);
+        }
+
+        /* Re-register a different callback, releases the prior ref. */
+        ret = WolfSSL.setLoggingCb(new TestLoggingCallback());
+        if (ret != WolfSSL.SSL_ERROR_NONE && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail("WolfSSL.setLoggingCb() re-register returned: " + ret);
+        }
+
+        ret = WolfSSL.setLoggingCb(null);
+        if (ret != WolfSSL.SSL_ERROR_NONE && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail("WolfSSL.setLoggingCb(null) returned unexpected value: " +
+                ret);
+        }
+
+        WolfSSL.debuggingON();
+
+        /* Concurrency stress: writers swap and clear the callback while drivers
+         * make native calls that log, firing NativeLoggingCallback during the
+         * swap/free. Exercises both the g_loggingCbIfaceObj mutex (no jobject
+         * UAF) and one-time native registration (setLoggingCb(null) never nulls
+         * native LogFunction). Passing with no JVM abort is the assertion. */
+        final int numThreads = 8;
+        final int iterations = 500;
+        final AtomicReference<Throwable> firstError =
+            new AtomicReference<Throwable>();
+        Thread[] threads = new Thread[numThreads];
+
+        for (int i = 0; i < numThreads; i++) {
+            final int id = i;
+            threads[i] = new Thread(new Runnable() {
+                public void run() {
+                    String role = ((id % 2) == 0) ? "writer" : "driver";
+                    try {
+                        for (int j = 0; j < iterations; j++) {
+                            if ((id % 2) == 0) {
+                                /* writer: swap in a callback, then clear it */
+                                WolfSSL.setLoggingCb(new TestLoggingCallback());
+                                WolfSSL.setLoggingCb(null);
+                            }
+                            else {
+                                /* driver: native call that logs on debug */
+                                long m = WolfSSL.SSLv23_ClientMethod();
+                                if (m != 0 && m != WolfSSL.NOT_COMPILED_IN) {
+                                    WolfSSL.nativeFree(m);
+                                }
+                            }
+                        }
+                    } catch (Throwable t) {
+                        firstError.compareAndSet(null,
+                            new Exception("in " + role + " thread", t));
+                    }
+                }
+            });
+        }
+
+        for (int i = 0; i < numThreads; i++) {
+            threads[i].start();
+        }
+        for (int i = 0; i < numThreads; i++) {
+            threads[i].join();
+        }
+
+        WolfSSL.debuggingOFF();
+
+        /* leave unregistered for other tests */
+        WolfSSL.setLoggingCb(null);
+
+        Throwable err = firstError.get();
+        if (err != null) {
+            AssertionError ae = new AssertionError(
+                "concurrent setLoggingCb() threw " + err.getMessage());
+            ae.initCause(err);
+            throw ae;
+        }
+    }
+
+    /* Test that NativeLoggingCallback dispatches to Java. Skips on builds
+     * without debug logging, or where WOLFSSL_ENTER trace messages are
+     * compiled out (ex: WOLFSSL_DEBUG_ERRORS_ONLY), rather than failing. */
+    @Test
+    public void test_WolfSSL_setLoggingCbDispatch() {
+
+        int ret = WolfSSL.setLoggingCb(new TestLoggingCallback());
+        Assume.assumeTrue("debug logging not compiled in",
+            ret == WolfSSL.SSL_ERROR_NONE);
+
+        WolfSSL.debuggingON();
+        TestLoggingCallback.count.set(0);
+        long m = WolfSSL.SSLv23_ClientMethod();
+        if (m != 0 && m != WolfSSL.NOT_COMPILED_IN) {
+            WolfSSL.nativeFree(m);
+        }
+        WolfSSL.debuggingOFF();
+        WolfSSL.setLoggingCb(null);
+
+        /* No message means this build compiled out trace logging, skip. */
+        Assume.assumeTrue("no trace messages emitted by this build",
+            TestLoggingCallback.count.get() > 0);
     }
 }

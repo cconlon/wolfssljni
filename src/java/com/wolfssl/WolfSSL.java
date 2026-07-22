@@ -1674,10 +1674,14 @@ public class WolfSSL {
     /**
      * Registers the callback to be used for Logging debug and trace
      * messages.
+     * <p>
+     * Once a callback has been registered, passing null stops delivery to it
+     * and native debug output is discarded, not reverted to wolfSSL's default
+     * output.
      *
-     * @param cb    Callback to be used for logging debug messages
+     * @param cb    Callback to be used for logging debug messages, or null to
+     *              stop delivering messages to a previously registered callback
      * @return      <b><code>SSL_ERROR_NONE</code></b> upon success,
-     *              <b><code>BAD_FUNC_ARG</code></b> if input is null,
      *              <b><code>NOT_COMPILED_IN</code></b> if wolfSSL was not
      *              compiled with debugging support enabled.
      * @see         #debuggingON()
