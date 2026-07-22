@@ -1,5 +1,5 @@
 NAME = wolfssl-jni-jsse
-VERSION = $(shell grep 'name="implementation.version"' build.xml | sed -re 's/.*value="(.+)".*/\1/')
+VERSION = $(shell grep 'name="implementation.version"' build.xml | sed -nre 's/.*value="([0-9A-Za-z._-]+)".*/\1/p')
 DIST_FILES = build.xml  COPYING  examples  IDE  java.sh  LICENSING  Makefile  native  platform \
 	     README.md  rpm  src
 
@@ -151,6 +151,9 @@ uninstall:
 	rm -f $(INSTALL_DIR)/$(LIBDIR)/wolfssl-jsse.jar
 
 dist:
+	@test -n "$(VERSION)" || { \
+		echo "ERROR: could not extract VERSION from build.xml" >&2 ; \
+		exit 1 ; }
 	@mkdir -p "$(NAME)-$(VERSION)"
 	@cp -pr $(DIST_FILES) "$(NAME)-$(VERSION)"
 	tar -zcf "$(NAME)-$(VERSION).tar.gz" "$(NAME)-$(VERSION)"
