@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ '*' ]
 
+# Cancel superseded in-progress runs for the same PR. Runs
+# triggered by push events are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   scan-build:
     runs-on: ubuntu-latest
@@ -18,34 +24,55 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-tools
 
-      # Cache Junit JARs
-      - name: Cache Junit JARs
-        uses: actions/cache@v3
-        id: cache-junit
+      # Cache the installed wolfSSL build. The key matches the one built
+      # in linux-common.yml for the same configure flags, so this job
+      # shares the cache with the main CI matrix.
+      - name: Resolve wolfSSL cache key
+        id: wolfssl-key
+        env:
+          WOLFSSL_CONFIGURE: '--enable-jni --enable-all'
+        run: |
+          SHA=$(git ls-remote https://github.com/wolfSSL/wolfssl.git \
+            refs/heads/master | cut -f1)
+          if [ -z "$SHA" ]; then
+            echo "Failed to resolve wolfSSL master SHA" >&2
+            exit 1
+          fi
+          CFG_HASH=$(printf '%s' "$WOLFSSL_CONFIGURE" | \
+            shasum -a 256 | cut -c1-16)
+          KEY="wolfssl-${{ runner.os }}-${{ runner.arch }}-$SHA-$CFG_HASH"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached wolfSSL install
+        id: cache-wolfssl
+        uses: actions/cache/restore@v4
         with:
-          path: ${{ github.workspace }}/junit
-          key: junit-cache-${{ runner.os }}-junit-4.13.2-hamcrest-1.3
-          restore-keys: |
-            junit-cache-${{ runner.os }}-
+          path: build-dir
+          key: ${{ steps.wolfssl-key.outputs.key }}
 
-      # Download Junit JARs (needed for full build)
-      - name: Download junit-4.13.2.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar
-      - name: Download hamcrest-all-1.3.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/org/hamcrest/hamcrest-all/1.3/hamcrest-all-1.3.jar
-
-      # Build native wolfSSL
+      # Build native wolfSSL, using the exact commit the cache key was
+      # computed from so the key and contents cannot drift if master
+      # advances mid-run.
       - name: Build native wolfSSL
+        if: steps.cache-wolfssl.outputs.cache-hit != 'true'
         uses: wolfSSL/actions-build-autotools-project@v1
         with:
           repository: wolfSSL/wolfssl
-          ref: master
+          ref: ${{ steps.wolfssl-key.outputs.sha }}
           path: wolfssl
           configure: '--enable-jni --enable-all'
           check: false
           install: true
+
+      # Save right after building (not at job end) so a later test
+      # failure does not prevent the cache from being populated.
+      - name: Save wolfSSL install to cache
+        if: steps.cache-wolfssl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build-dir
+          key: ${{ steps.wolfssl-key.outputs.key }}
 
       # Setup Java
       - name: Setup java
@@ -54,19 +81,15 @@ jobs:
           distribution: 'zulu'
           java-version: '11'
 
-      - name: Set JUNIT_HOME
-        run: |
-          echo "JUNIT_HOME=$GITHUB_WORKSPACE/junit" >> "$GITHUB_ENV"
-      - name: Set LD_LIBRARY_PATH
-        run: |
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
-
-      # Run scan-build over the native JNI C files
+      # Run scan-build over the native JNI C files. scan-build only
+      # analyzes C compilations, so build the native target alone and
+      # skip the Java side of the default make target. JUnit jars and
+      # LD_LIBRARY_PATH are not needed since no tests run here.
       - name: Run scan-build
         env:
           PREFIX: ${{ github.workspace }}/build-dir
         run: |
-          scan-build --status-bugs -o scan-build-reports make
+          scan-build --status-bugs -o scan-build-reports make native
 
       # Upload scan-build results as artifacts
       - name: Upload scan-build results

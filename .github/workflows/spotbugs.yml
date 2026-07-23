@@ -8,6 +8,11 @@ on:
       - 'build.xml'
       - 'spotbugs-exclude.xml'
 
+# Cancel superseded in-progress runs for the same PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   spotbugs:
     runs-on: ubuntu-latest
@@ -28,14 +33,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ant
 
-      - name: Download JUnit
-        run: |
-          mkdir -p /tmp/junit
-          wget -q -P /tmp/junit \
-            "https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar"
-          EXPECTED_SHA="8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3"
-          echo "${EXPECTED_SHA}  /tmp/junit/junit-4.13.2.jar" | sha256sum -c -
-          echo "JUNIT_HOME=/tmp/junit" >> $GITHUB_ENV
+      - name: Setup JUnit
+        uses: ./.github/actions/setup-junit
 
       - name: Download and set up SpotBugs
         run: |

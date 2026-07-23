@@ -12,9 +12,6 @@ on:
       jdk_version:
         required: true
         type: string
-      wolfssl_configure:
-        required: true
-        type: string
 
 jobs:
   build_wolfssljni:
@@ -22,30 +19,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Infer runs javac directly over the Java sources (see
+      # scripts/infer.sh), so this job does not need native wolfSSL,
+      # the JNI library, JUnit, or the test suite. Tests for this
+      # configuration run in the main CI matrix (linux-zulu-all).
+
+      # Cache the extracted Infer release (~100MB download per run).
+      - name: Restore cached Infer
+        id: cache-infer
+        uses: actions/cache/restore@v4
+        with:
+          path: infer-*-v1.2.0
+          key: infer-v1.2.0-${{ runner.os }}-${{ runner.arch }}
+
       # Download Facebook Infer (Linux)
       - name: Download Infer (Linux)
-        if: runner.os == 'Linux'
+        if: >-
+          steps.cache-infer.outputs.cache-hit != 'true' &&
+          runner.os == 'Linux'
         run: wget https://github.com/facebook/infer/releases/download/v1.2.0/infer-linux-x86_64-v1.2.0.tar.xz
       - name: Extract Infer (Linux)
-        if: runner.os == 'Linux'
+        if: >-
+          steps.cache-infer.outputs.cache-hit != 'true' &&
+          runner.os == 'Linux'
         run: tar -xvf infer-linux-x86_64-v1.2.0.tar.xz
-      - name: Symlink Infer (Linux)
-        if: runner.os == 'Linux'
-        run: ln -s "$GITHUB_WORKSPACE/infer-linux-x86_64-v1.2.0/bin/infer" /usr/local/bin/infer
 
       # Download Facebook Infer (macOS)
       - name: Download Infer (macOS x86_64)
-        if: runner.os == 'macOS' && runner.arch == 'X64'
+        if: >-
+          steps.cache-infer.outputs.cache-hit != 'true' &&
+          runner.os == 'macOS' && runner.arch == 'X64'
         run: wget https://github.com/facebook/infer/releases/download/v1.2.0/infer-osx-x86_64-v1.2.0.tar.xz
       - name: Download Infer (macOS ARM64)
-        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+        if: >-
+          steps.cache-infer.outputs.cache-hit != 'true' &&
+          runner.os == 'macOS' && runner.arch == 'ARM64'
         run: wget https://github.com/facebook/infer/releases/download/v1.2.0/infer-osx-arm64-v1.2.0.tar.xz
       - name: Extract Infer (macOS x86_64)
-        if: runner.os == 'macOS' && runner.arch == 'X64'
+        if: >-
+          steps.cache-infer.outputs.cache-hit != 'true' &&
+          runner.os == 'macOS' && runner.arch == 'X64'
         run: tar -xvf infer-osx-x86_64-v1.2.0.tar.xz
       - name: Extract Infer (macOS ARM64)
-        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+        if: >-
+          steps.cache-infer.outputs.cache-hit != 'true' &&
+          runner.os == 'macOS' && runner.arch == 'ARM64'
         run: tar -xvf infer-osx-arm64-v1.2.0.tar.xz
+
+      # Save right after extracting so a failed Infer run (issues
+      # found) does not prevent the cache from being populated.
+      - name: Save Infer to cache
+        if: steps.cache-infer.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: infer-*-v1.2.0
+          key: infer-v1.2.0-${{ runner.os }}-${{ runner.arch }}
+
+      # Symlink Infer into PATH
+      - name: Symlink Infer (Linux)
+        if: runner.os == 'Linux'
+        run: ln -s "$GITHUB_WORKSPACE/infer-linux-x86_64-v1.2.0/bin/infer" /usr/local/bin/infer
       - name: Symlink Infer (macOS x86_64)
         if: runner.os == 'macOS' && runner.arch == 'X64'
         run: ln -s "$GITHUB_WORKSPACE/infer-osx-x86_64-v1.2.0/bin/infer" /usr/local/bin/infer
@@ -56,69 +89,12 @@ jobs:
       - name: Test Infer get version
         run: infer --version
 
-      # Cache and Download Junit JARs
-      - name: Cache JUnit dependencies
-        uses: actions/cache@v4
-        id: cache-junit
-        with:
-          path: junit
-          key: junit-jars-v1
-
-      - name: Download junit-4.13.2.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar
-      - name: Download hamcrest-all-1.3.jar
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: wget --directory-prefix=$GITHUB_WORKSPACE/junit https://repo1.maven.org/maven2/org/hamcrest/hamcrest-all/1.3/hamcrest-all-1.3.jar
-
-      # Build native wolfSSL
-      - name: Build native wolfSSL
-        uses: wolfSSL/actions-build-autotools-project@v1
-        with:
-          repository: wolfSSL/wolfssl
-          ref: master
-          path: wolfssl
-          configure: ${{ inputs.wolfssl_configure }}
-          check: false
-          install: true
-
       # Setup Java
       - name: Setup java
         uses: actions/setup-java@v4
         with:
           distribution: ${{ inputs.jdk_distro }}
           java-version: ${{ inputs.jdk_version }}
-
-      - name: Set JUNIT_HOME
-        run: |
-          echo "JUNIT_HOME=$GITHUB_WORKSPACE/junit" >> "$GITHUB_ENV"
-
-      - name: Set LD_LIBRARY_PATH (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
-
-      - name: Set DYLD_LIBRARY_PATH (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          echo "DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build-dir/lib" >> "$GITHUB_ENV"
-
-      # Build wolfssljni JNI library (libwolfssljni.so)
-      - name: Build JNI library
-        run: ./java.sh $GITHUB_WORKSPACE/build-dir
-
-      # Build wolfssljni JAR (wolfssljni.jar)
-      - name: Build JAR (ant)
-        run: ant
-
-      # Run ant tests
-      - name: Run Java tests (ant test)
-        run: ant test
-
-      - name: Show logs on failure
-        if: failure() || cancelled()
-        run: |
-          cat build/reports/*.txt
 
       # Run Facebook Infer
       - name: Run Facebook Infer
@@ -127,4 +103,3 @@ jobs:
       - name: Shows Infer report on failure
         if: failure()
         run: cat infer-out/report.txt
-
