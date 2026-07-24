@@ -29,7 +29,10 @@ import org.junit.rules.TestRule;
 import static org.junit.Assert.*;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.net.Socket;
 import java.net.ServerSocket;
 import java.net.DatagramSocket;
@@ -254,6 +257,75 @@ public class WolfSSLSessionTest {
         }
 
         return;
+    }
+
+    private void assertUseBufferOk(String name, int ret) {
+        if (ret != WolfSSL.SSL_SUCCESS && ret != WolfSSL.NOT_COMPILED_IN) {
+            fail(name + " failed, ret = " + ret);
+        }
+    }
+
+    /* The use*Buffer methods must reject a sz that is non-positive or larger
+     * than the array, while still honoring a sz smaller than the array. */
+    @Test
+    public void test_WolfSSLSession_useBufferRejectsBadSz()
+        throws WolfSSLJNIException, WolfSSLException, IOException {
+
+        byte[] certPem = Files.readAllBytes(Paths.get(cliCert));
+        byte[] keyPem  = Files.readAllBytes(Paths.get(cliKey));
+
+        /* sz with non-zero upper 32 bits, lower 32 bits == array length */
+        final long certBadSz = 0x100000000L | certPem.length;
+        final long keyBadSz  = 0x100000000L | keyPem.length;
+
+        /* null buffer returns BAD_FUNC_ARG on all three */
+        WolfSSLSession ssl = new WolfSSLSession(ctx);
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.useCertificateBuffer(null, 0, WolfSSL.SSL_FILETYPE_PEM));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.usePrivateKeyBuffer(null, 0, WolfSSL.SSL_FILETYPE_PEM));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.useCertificateChainBuffer(null, 0));
+        ssl.freeSSL();
+
+        /* correct sz loads, zero/oversized rejected, sub-array (sz < len)
+         * still loads the first sz bytes */
+        ssl = new WolfSSLSession(ctx);
+        assertUseBufferOk("useCertificateBuffer",
+            ssl.useCertificateBuffer(certPem, certPem.length,
+                WolfSSL.SSL_FILETYPE_PEM));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.useCertificateBuffer(certPem, 0, WolfSSL.SSL_FILETYPE_PEM));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.useCertificateBuffer(certPem, certBadSz,
+                WolfSSL.SSL_FILETYPE_PEM));
+        byte[] certPadded = Arrays.copyOf(certPem, certPem.length + 32);
+        assertUseBufferOk("useCertificateBuffer subArray",
+            ssl.useCertificateBuffer(certPadded, certPem.length,
+                WolfSSL.SSL_FILETYPE_PEM));
+        ssl.freeSSL();
+
+        /* usePrivateKeyBuffer: correct sz loads, zero and oversized rejected */
+        ssl = new WolfSSLSession(ctx);
+        assertUseBufferOk("usePrivateKeyBuffer",
+            ssl.usePrivateKeyBuffer(keyPem, keyPem.length,
+                WolfSSL.SSL_FILETYPE_PEM));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.usePrivateKeyBuffer(keyPem, 0, WolfSSL.SSL_FILETYPE_PEM));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.usePrivateKeyBuffer(keyPem, keyBadSz,
+                WolfSSL.SSL_FILETYPE_PEM));
+        ssl.freeSSL();
+
+        /* useCertificateChainBuffer: correct sz loads, others rejected */
+        ssl = new WolfSSLSession(ctx);
+        assertUseBufferOk("useCertificateChainBuffer",
+            ssl.useCertificateChainBuffer(certPem, certPem.length));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.useCertificateChainBuffer(certPem, 0));
+        assertEquals(WolfSSL.BAD_FUNC_ARG,
+            ssl.useCertificateChainBuffer(certPem, certBadSz));
+        ssl.freeSSL();
     }
 
     class TestPskClientCb implements WolfSSLPskClientCallback

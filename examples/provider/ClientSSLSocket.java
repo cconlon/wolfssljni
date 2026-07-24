@@ -105,6 +105,13 @@ public class ClientSSLSocket {
             SSLSocketFactory sf = ctx.getSocketFactory();
             SSLSocket sock = (SSLSocket)sf.createSocket(host, port);
 
+            /* Enable hostname verification against the peer certificate. A
+             * raw SSLSocket does not check that the certificate matches the
+             * host unless the endpoint identification algorithm is set. */
+            SSLParameters params = sock.getSSLParameters();
+            params.setEndpointIdentificationAlgorithm("HTTPS");
+            sock.setSSLParameters(params);
+
             sock.startHandshake();
 
             sock.close();
