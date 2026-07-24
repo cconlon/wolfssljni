@@ -127,7 +127,8 @@ public class WolfSSLCertRequest {
      * @param name Initialized and populated WolfSSLX509 name to be set into
      *        Subject Name of WolfSSLCertRequest for cert generation.
      *
-     * @throws IllegalStateException if WolfSSLCertRequest has been freed.
+     * @throws IllegalStateException if WolfSSLCertRequest has been freed, or
+     *         if the provided WolfSSLX509Name has been freed.
      * @throws WolfSSLException if native JNI error occurs.
      */
     public void setSubjectName(WolfSSLX509Name name)
@@ -142,9 +143,12 @@ public class WolfSSLCertRequest {
                 WolfSSLDebug.INFO, this.x509ReqPtr,
                 () -> "entered setSubjectName(" + name + ")");
 
-            /* TODO somehow lock WolfSSLX509Name object while using pointer? */
-            ret = X509_REQ_set_subject_name(this.x509ReqPtr,
+            /* Synchronize on the name so its free() can't release the native
+             * pointer during the call below. */
+            synchronized (name) {
+                ret = X509_REQ_set_subject_name(this.x509ReqPtr,
                     name.getNativeX509NamePtr());
+            }
         }
 
         if (ret != WolfSSL.SSL_SUCCESS) {

@@ -4290,6 +4290,113 @@ public class WolfSSLSocketTest {
     }
 
     /**
+     * A handshake that fails by throwing SSLHandshakeException from
+     * doHandshake() leaves handshakeStarted true and handshakeComplete
+     * false. A later read()/write() must not wait forever on that state.
+     * This drives the server-side SNI mismatch path, which throws
+     * SSLHandshakeException after the native handshake completes, then
+     * confirms a subsequent read() returns instead of hanging.
+     */
+    @Test
+    public void testReadDoesNotHangAfterFailedHandshake()
+        throws Exception {
+
+        /* SNI matcher rejection requires wolfSSL 5.7.6 or later, matching
+         * testSNIMatchers above. */
+        long libVerHex = WolfSSL.getLibVersionHex();
+        Assume.assumeTrue(libVerHex >= 0x05007006L);
+
+        this.ctx = tf.createSSLContext("TLS", ctxProvider);
+
+        final SSLServerSocket ss = (SSLServerSocket)ctx
+            .getServerSocketFactory().createServerSocket(0);
+
+        /* Server accepts only SNI www.example.com */
+        SNIMatcher matcher =
+            SNIHostName.createSNIMatcher("www\\.example\\.com");
+        Collection<SNIMatcher> matchers = new ArrayList<>();
+        matchers.add(matcher);
+        SSLParameters sp = ss.getSSLParameters();
+        sp.setSNIMatchers(matchers);
+        ss.setSSLParameters(sp);
+
+        ExecutorService es = Executors.newSingleThreadExecutor();
+        SSLSocket cs = null;
+        SSLSocket server = null;
+
+        try {
+            cs = (SSLSocket)ctx.getSocketFactory().createSocket();
+            cs.connect(new InetSocketAddress(ss.getLocalPort()));
+
+            /* Non-matching SNI makes the server throw SSLHandshakeException
+             * after the native handshake completes. */
+            SNIHostName serverName = new SNIHostName("www.example.org");
+            List<SNIServerName> serverNames = new ArrayList<>();
+            serverNames.add(serverName);
+            SSLParameters cp = cs.getSSLParameters();
+            cp.setServerNames(serverNames);
+            cs.setSSLParameters(cp);
+
+            server = (SSLSocket)ss.accept();
+            /* No SO_TIMEOUT on purpose: a timeout would turn a hung
+             * handshake wait into a SocketTimeoutException and mask the
+             * regression this test detects. */
+
+            final SSLSocket srv = server;
+            Future<Void> serverFuture = es.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    try {
+                        srv.startHandshake();
+                        fail("Server handshake should fail on bad SNI");
+                    } catch (SSLHandshakeException e) {
+                        /* expected */
+                    }
+
+                    /* Must not block on the handshake wait. Any return or
+                     * exception is acceptable, only a hang is a failure. */
+                    try {
+                        srv.getInputStream().read(new byte[16]);
+                    } catch (Exception e) {
+                        /* SocketException from closed connection expected */
+                    }
+                    return null;
+                }
+            });
+
+            try {
+                cs.startHandshake();
+            } catch (SSLHandshakeException e) {
+                /* Client may or may not throw, both are acceptable */
+            }
+
+            try {
+                serverFuture.get(20, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                fail("read() hung after a failed handshake");
+            }
+
+        } finally {
+            es.shutdownNow();
+            if (cs != null) {
+                try {
+                    cs.close();
+                } catch (Exception e) {
+                    /* ignore close error during cleanup */
+                }
+            }
+            if (server != null) {
+                try {
+                    server.close();
+                } catch (Exception e) {
+                    /* ignore close error during cleanup */
+                }
+            }
+            ss.close();
+        }
+    }
+
+    /**
      * Inner class used to hold configuration options for
      * TestServer and TestClient classes.
      */

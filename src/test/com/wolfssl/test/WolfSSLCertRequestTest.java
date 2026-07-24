@@ -32,6 +32,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 import java.security.PublicKey;
 import java.security.PrivateKey;
@@ -724,5 +726,65 @@ public class WolfSSLCertRequestTest {
     private void writeOutCsrFile(byte[] csr, String path)
         throws IOException {
         Files.write(new File(path).toPath(), csr);
+    }
+
+    /* setSubjectName() holds the WolfSSLX509Name lock across the native call
+     * so a concurrent free() cannot free the pointer mid-call. Races the two
+     * operations to check concurrency safety and deadlock-freedom of the added
+     * locking, tolerating the expected exceptions when free() wins the race. */
+    @Test(timeout = 60000)
+    public void testSetSubjectNameFreeRace()
+        throws WolfSSLException, WolfSSLJNIException, InterruptedException {
+
+        Assume.assumeTrue(WolfSSL.certReqEnabled());
+
+        final int iterations = 200;
+        final AtomicReference<Throwable> failure =
+            new AtomicReference<Throwable>();
+
+        for (int i = 0; i < iterations && failure.get() == null; i++) {
+
+            final WolfSSLCertRequest req = new WolfSSLCertRequest();
+            final WolfSSLX509Name name = GenerateTestSubjectName();
+            final CountDownLatch start = new CountDownLatch(1);
+
+            Thread setter = new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        start.await();
+                        req.setSubjectName(name);
+                    } catch (IllegalStateException | WolfSSLException e) {
+                        /* expected if free() won the race */
+                    } catch (Throwable t) {
+                        failure.compareAndSet(null, t);
+                    }
+                }
+            });
+            Thread freer = new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        start.await();
+                        name.free();
+                    } catch (Throwable t) {
+                        failure.compareAndSet(null, t);
+                    }
+                }
+            });
+
+            setter.start();
+            freer.start();
+            start.countDown();
+            setter.join();
+            freer.join();
+
+            name.free();
+            req.free();
+        }
+
+        if (failure.get() != null) {
+            throw new AssertionError(
+                "unexpected error during setSubjectName/free race",
+                failure.get());
+        }
     }
 }

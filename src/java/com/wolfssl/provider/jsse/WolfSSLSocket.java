@@ -1583,7 +1583,9 @@ public class WolfSSLSocket extends SSLSocket {
             } catch (SSLHandshakeException e){
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                     () -> "got SSLHandshakeException in doHandshake()");
+                close();
                 throw e;
+
             } catch (SSLException e) {
                 final int tmpErr = err;
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
@@ -1592,6 +1594,7 @@ public class WolfSSLSocket extends SSLSocket {
                     Thread.currentThread().getId() + ")");
                 close();
                 throw e;
+
             } catch (WolfSSLException e) {
                 /* close socket if the handshake is unsuccessful */
                 close();
@@ -1623,8 +1626,10 @@ public class WolfSSLSocket extends SSLSocket {
         synchronized (handshakeLock) {
             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                 () -> "thread got handshakeLock (handshakeComplete)");
-            /* mark handshake completed */
+            /* Mark handshake completed, then wake read()/write() waiters so
+             * they stop waiting on the in-progress handshake */
             handshakeComplete = true;
+            handshakeLock.notifyAll();
         }
 
         /* notify handshake completed listeners */
@@ -1647,6 +1652,66 @@ public class WolfSSLSocket extends SSLSocket {
             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                 () -> "SSL/TLS cipher suite: " +
                 EngineHelper.getSession().getCipherSuite());
+        }
+    }
+
+    /**
+     * Block until any in-progress handshake finishes or the connection
+     * closes, bounded by SO_TIMEOUT, then report whether this thread must
+     * start the handshake itself. Called by stream read()/write() so native
+     * I/O is never dispatched while a handshake runs on the same WOLFSSL*.
+     * The start decision is made under handshakeLock together with the wait,
+     * so a handshake cannot slip in between. startHandshake() is left to the
+     * caller (after the lock is released) to avoid a lock-order inversion
+     * with close(), which takes the socket monitor before handshakeLock.
+     *
+     * @return true if the caller should invoke startHandshake()
+     * @throws SocketException if the connection is already closed or the
+     *         wait is interrupted
+     * @throws SocketTimeoutException if SO_TIMEOUT elapses while waiting
+     * @throws IOException if SO_TIMEOUT cannot be read
+     */
+    private boolean waitForHandshakeThenCheckStart() throws IOException {
+
+        long remaining;
+
+        /* Read SO_TIMEOUT before locking to keep lock order consistent. */
+        int soTimeout = getSoTimeout();
+        long endTime = (soTimeout > 0) ?
+            System.currentTimeMillis() + soTimeout : 0;
+
+        synchronized (handshakeLock) {
+            if (this.connectionClosed == true) {
+                throw new SocketException("Connection already shutdown");
+            }
+
+            while (this.handshakeStarted && !this.handshakeComplete &&
+                !this.connectionClosed) {
+
+                try {
+                    if (soTimeout > 0) {
+                        remaining = endTime - System.currentTimeMillis();
+                        if (remaining <= 0) {
+                            throw new SocketTimeoutException(
+                                "Timed out waiting for handshake");
+                        }
+                        handshakeLock.wait(remaining);
+                    } else {
+                        handshakeLock.wait();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new SocketException(
+                        "Interrupted waiting for handshake");
+                }
+            }
+
+            if (this.connectionClosed == true) {
+                throw new SocketException("Connection already shutdown");
+            }
+
+            return (this.handshakeComplete == false &&
+                this.handshakeStarted == false);
         }
     }
 
@@ -2071,6 +2136,9 @@ public class WolfSSLSocket extends SSLSocket {
                         WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                             () -> "Socket already closed, skipping " +
                             "TLS shutdown");
+                        /* Mark closed and wake any read()/write() waiters */
+                        this.connectionClosed = true;
+                        handshakeLock.notifyAll();
                         return;
                     }
 
@@ -2137,8 +2205,6 @@ public class WolfSSLSocket extends SSLSocket {
                         synchronized (handshakeLock) {
                             WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                                 () -> "thread got handshakeLock");
-
-                            this.connectionClosed = true;
 
                             /* Release native verify callback (JNI global) */
                             if (this.EngineHelper != null) {
@@ -2214,6 +2280,14 @@ public class WolfSSLSocket extends SSLSocket {
                                 ", streams not closed, or active operations: " +
                                 activeOperations.get());
                         }
+                    }
+
+                    /* Mark closed on every teardown path, before clearing
+                     * EngineHelper, so a later startHandshake() won't NPE.
+                     * Wake any read()/write() waiting on the handshake. */
+                    synchronized (handshakeLock) {
+                        this.connectionClosed = true;
+                        handshakeLock.notifyAll();
                     }
 
                     /* Reset internal WolfSSLEngineHelper to null */
@@ -2730,25 +2804,12 @@ public class WolfSSLSocket extends SSLSocket {
                     throw new SocketException("Socket is closed");
                 }
 
-                /* check if connection has already been closed/shutdown */
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "trying to get socket.handshakeLock (read)");
-
-                synchronized (socket.handshakeLock) {
-                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "thread got socket.handshakeLock (read)");
-
-                    if (socket.connectionClosed == true) {
-                        throw new SocketException(
-                            "Connection already shutdown");
-                    }
-                }
-
+                /* Wait for any in-progress handshake to finish, then drive
+                 * one here if needed. Keeps ssl.read() off a WOLFSSL* whose
+                 * handshake is still running under ioLock. The helper throws
+                 * if the connection has already been closed. */
                 try {
-                    /* do handshake if not completed yet, handles
-                     * synchronization */
-                    if (socket.handshakeComplete == false &&
-                        socket.handshakeStarted == false) {
+                    if (socket.waitForHandshakeThenCheckStart()) {
                         socket.startHandshake();
                     }
                 } catch (SocketTimeoutException e) {
@@ -2964,24 +3025,12 @@ public class WolfSSLSocket extends SSLSocket {
                     throw new SocketException("Socket is closed");
                 }
 
-                /* check if connection has already been closed/shutdown */
-                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                    () -> "trying to get socket.handshakeLock (write)");
-
-                synchronized (socket.handshakeLock) {
-                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "thread got socket.handshakeLock (write)");
-                    if (socket.connectionClosed == true) {
-                        throw new SocketException(
-                            "Connection already shutdown");
-                    }
-                }
-
+                /* Wait for any in-progress handshake to finish, then drive
+                 * one here if needed. Keeps ssl.write() off a WOLFSSL* whose
+                 * handshake is still running under ioLock. The helper throws
+                 * if the connection has already been closed. */
                 try {
-                    /* do handshake if not completed yet, handles
-                     * synchronization */
-                    if (socket.handshakeComplete == false &&
-                        socket.handshakeStarted == false) {
+                    if (socket.waitForHandshakeThenCheckStart()) {
                         socket.startHandshake();
                     }
                 } catch (SocketTimeoutException e) {
