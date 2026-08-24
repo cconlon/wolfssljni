@@ -30,6 +30,7 @@ import static org.junit.Assert.*;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -42,6 +43,12 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.util.Date;
 import java.util.Calendar;
+import java.util.TimeZone;
+import java.math.BigInteger;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509CRL;
+import java.security.cert.X509CRLEntry;
+import java.security.cert.X509Certificate;
 
 import com.wolfssl.WolfSSL;
 import com.wolfssl.WolfSSLX509Name;
@@ -344,31 +351,110 @@ public class WolfSSLCRLTest {
     }
 
     @Test
-    public void testAddRevokedCert_ByteArray()
-        throws WolfSSLException, WolfSSLJNIException, IOException,
-               CertificateException {
+    public void testAddRevokedHonorsRevocationDate()
+        throws Exception {
 
         Assume.assumeTrue(WolfSSL.CrlGenerationEnabled());
 
         WolfSSLCRL crl = new WolfSSLCRL();
         assertNotNull(crl);
 
-        /* Load certificate from PEM file and convert to DER */
+        crl.setVersion(1);
+        WolfSSLX509Name issuerName = GenerateTestIssuerName();
+        crl.setIssuerName(issuerName);
+        crl.setLastUpdate(new Date());
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.DAY_OF_YEAR, 30);
+        crl.setNextUpdate(cal.getTime());
+
+        /* Fixed past revocation date, distinct from the current time the
+         * discarded-date path would otherwise record. */
+        Calendar revCal = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        revCal.clear();
+        revCal.set(2020, Calendar.JANUARY, 2, 3, 4, 5);
+        Date revDate = revCal.getTime();
+
+        byte[] serial = new byte[] { 0x11, 0x22, 0x33, 0x44 };
+        int ret = crl.addRevoked(serial, revDate);
+        assertTrue("addRevoked should succeed", ret >= 0);
+
+        /* Sign so the entry is DER-encoded, then read the date back. */
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        int signRet = crl.sign(kpg.generateKeyPair().getPrivate(), "SHA256");
+        assertTrue("CRL sign should succeed", signRet >= 0);
+        byte[] der = crl.getDer();
+        assertNotNull("CRL DER should not be null", der);
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509CRL parsed = (X509CRL)cf.generateCRL(new ByteArrayInputStream(der));
+        X509CRLEntry entry = parsed.getRevokedCertificate(
+            new BigInteger(1, serial));
+        assertNotNull("revoked entry should be present", entry);
+        assertEquals("revocation date must match the value passed in",
+            revDate, entry.getRevocationDate());
+
+        issuerName.free();
+        crl.free();
+    }
+
+    /* Check a signed CRL revokes the certificate, on the expected date when
+     * one is given. The JDK parses both, as an independent check. */
+    private static void assertCrlRevokesCert(byte[] crlDer, byte[] certDer,
+        Date expectedDate) throws Exception {
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate cert = (X509Certificate)cf.generateCertificate(
+            new ByteArrayInputStream(certDer));
+        X509CRL parsed = (X509CRL)cf.generateCRL(
+            new ByteArrayInputStream(crlDer));
+        X509CRLEntry entry = parsed.getRevokedCertificate(
+            cert.getSerialNumber());
+        assertNotNull("entry for the certificate serial should be present",
+            entry);
+        if (expectedDate != null) {
+            assertEquals("revocation date must match the value passed in",
+                expectedDate, entry.getRevocationDate());
+        }
+    }
+
+    /* Fixed past date, distinct from the current time recorded by default. */
+    private static Date fixedRevocationDate() {
+
+        Calendar revCal = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        revCal.clear();
+        revCal.set(2020, Calendar.JANUARY, 2, 3, 4, 5);
+
+        return revCal.getTime();
+    }
+
+    @Test
+    public void testAddRevokedCert_ByteArray() throws Exception {
+
+        Assume.assumeTrue(WolfSSL.CrlGenerationEnabled());
+
+        WolfSSLCRL crl = new WolfSSLCRL();
+        assertNotNull(crl);
+
+        crl.setVersion(1);
+        WolfSSLX509Name issuerName = GenerateTestIssuerName();
+        crl.setIssuerName(issuerName);
+        crl.setLastUpdate(new Date());
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.DAY_OF_YEAR, 30);
+        crl.setNextUpdate(cal.getTime());
+
+        /* Load certificates from PEM and convert to DER */
         WolfSSLCertificate cert = new WolfSSLCertificate(clientCertPem,
             WolfSSL.SSL_FILETYPE_PEM);
         assertNotNull(cert);
         byte[] certDer = cert.getDer();
         assertNotNull(certDer);
         assertTrue(certDer.length > 0);
-
-        /* Add revoked certificate by DER */
-        Date revDate = new Date();
-        int ret = crl.addRevokedCert(certDer, revDate);
-        assertTrue("addRevokedCert should succeed", ret >= 0);
-
-        /* Add revoked certificate without revocation date */
-        ret = crl.addRevokedCert(certDer, null);
-        assertTrue("addRevokedCert should succeed", ret >= 0);
+        WolfSSLCertificate caCert = new WolfSSLCertificate(caCertPem,
+            WolfSSL.SSL_FILETYPE_PEM);
+        byte[] caDer = caCert.getDer();
+        assertNotNull(caDer);
 
         /* Test null certificate DER */
         try {
@@ -386,34 +472,61 @@ public class WolfSSLCRLTest {
             /* expected */
         }
 
+        /* Test unparseable certificate DER with a date */
+        try {
+            crl.addRevokedCert(new byte[] { 0x01, 0x02, 0x03 }, new Date());
+            fail("unparseable certificate DER should throw exception");
+        } catch (IllegalArgumentException e) {
+            /* expected */
+        }
+
+        /* Revoke with an explicit date, and a second cert with none */
+        Date revDate = fixedRevocationDate();
+        int ret = crl.addRevokedCert(certDer, revDate);
+        assertTrue("addRevokedCert with date should succeed", ret >= 0);
+        ret = crl.addRevokedCert(caDer, null);
+        assertTrue("addRevokedCert should succeed", ret >= 0);
+
+        /* Sign, then check both entries and the requested date */
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        int signRet = crl.sign(kpg.generateKeyPair().getPrivate(), "SHA256");
+        assertTrue("CRL sign should succeed", signRet >= 0);
+        byte[] crlDer = crl.getDer();
+        assertNotNull(crlDer);
+
+        assertCrlRevokesCert(crlDer, certDer, revDate);
+        assertCrlRevokesCert(crlDer, caDer, null);
+
+        cert.free();
+        caCert.free();
+        issuerName.free();
         crl.free();
     }
 
     @Test
-    public void testAddRevokedCert_WolfSSLCertificate()
-        throws WolfSSLException, WolfSSLJNIException, IOException,
-               CertificateException {
+    public void testAddRevokedCert_WolfSSLCertificate() throws Exception {
 
         Assume.assumeTrue(WolfSSL.CrlGenerationEnabled());
 
         WolfSSLCRL crl = new WolfSSLCRL();
         assertNotNull(crl);
 
-        /* Load certificate */
+        crl.setVersion(1);
+        WolfSSLX509Name issuerName = GenerateTestIssuerName();
+        crl.setIssuerName(issuerName);
+        crl.setLastUpdate(new Date());
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.DAY_OF_YEAR, 30);
+        crl.setNextUpdate(cal.getTime());
+
+        /* Load certificates */
         WolfSSLCertificate cert = new WolfSSLCertificate(clientCertPem,
             WolfSSL.SSL_FILETYPE_PEM);
         assertNotNull(cert);
-
-        /* Add revoked certificate */
-        Date revDate = new Date();
-        int ret = crl.addRevokedCert(cert, revDate);
-        assertTrue("addRevokedCert should succeed", ret >= 0);
-
-        /* Add revoked certificate without revocation date */
-        WolfSSLCertificate cert2 = new WolfSSLCertificate(clientCertPem,
+        WolfSSLCertificate caCert = new WolfSSLCertificate(caCertPem,
             WolfSSL.SSL_FILETYPE_PEM);
-        ret = crl.addRevokedCert(cert2, null);
-        assertTrue("addRevokedCert should succeed", ret >= 0);
+        assertNotNull(caCert);
 
         /* Test null certificate */
         try {
@@ -423,9 +536,28 @@ public class WolfSSLCRLTest {
             /* expected */
         }
 
+        /* Revoke with an explicit date, and a second cert with none */
+        Date revDate = fixedRevocationDate();
+        int ret = crl.addRevokedCert(cert, revDate);
+        assertTrue("addRevokedCert with date should succeed", ret >= 0);
+        ret = crl.addRevokedCert(caCert, null);
+        assertTrue("addRevokedCert should succeed", ret >= 0);
+
+        /* Sign, then check both entries and the requested date */
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        int signRet = crl.sign(kpg.generateKeyPair().getPrivate(), "SHA256");
+        assertTrue("CRL sign should succeed", signRet >= 0);
+        byte[] crlDer = crl.getDer();
+        assertNotNull(crlDer);
+
+        assertCrlRevokesCert(crlDer, cert.getDer(), revDate);
+        assertCrlRevokesCert(crlDer, caCert.getDer(), null);
+
         /* Free native memory */
         cert.free();
-        cert2.free();
+        caCert.free();
+        issuerName.free();
         crl.free();
     }
 
@@ -847,8 +979,7 @@ public class WolfSSLCRLTest {
         /* Add revoked certificates using WolfSSLCertificate objects */
         WolfSSLCertificate cert1 = new WolfSSLCertificate(clientCertPem,
             WolfSSL.SSL_FILETYPE_PEM);
-        Date revDate1 = new Date();
-        crl.addRevokedCert(cert1, revDate1);
+        crl.addRevokedCert(cert1, null);
 
         /* Sign CRL with RSA key */
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");

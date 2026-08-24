@@ -1577,7 +1577,7 @@ public class WolfSSLCertificate implements Serializable {
      */
     public BigInteger getSerial() throws IllegalStateException {
 
-        byte[] out = new byte[32];
+        byte[] out = new byte[WolfSSL.EXTERNAL_SERIAL_SIZE];
         int sz;
 
         confirmObjectIsActive();
@@ -1595,6 +1595,35 @@ public class WolfSSLCertificate implements Serializable {
             byte[] serial = Arrays.copyOf(out, sz);
             return new BigInteger(serial);
         }
+    }
+
+    /**
+     * Return an X.509 serial number as the raw bytes.
+     *
+     * @return serial number bytes, or null if not available
+     *
+     * @throws IllegalStateException if WolfSSLCertificate has been freed.
+     */
+    byte[] getSerialBytes() throws IllegalStateException {
+
+        int sz;
+        byte[] out = new byte[WolfSSL.EXTERNAL_SERIAL_SIZE];
+
+        confirmObjectIsActive();
+
+        synchronized (x509Lock) {
+            WolfSSLDebug.log(getClass(), WolfSSLDebug.Component.JNI,
+                WolfSSLDebug.INFO, this.x509Ptr,
+                () -> "entering getSerialBytes()");
+
+            sz = X509_get_serial_number(this.x509Ptr, out);
+        }
+
+        if (sz <= 0) {
+            return null;
+        }
+
+        return Arrays.copyOf(out, sz);
     }
 
     /**

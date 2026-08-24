@@ -357,6 +357,10 @@ public class WolfSSL {
     /** Maximum SSL record size (16KB) as defined by the protocol. */
     public static final int MAX_RECORD_SIZE = 16384;
 
+    /** Maximum X.509 serial number size in bytes. Matches
+     *  EXTERNAL_SERIAL_SIZE in wolfssl/wolfcrypt/asn.h. */
+    public static final int EXTERNAL_SERIAL_SIZE = 32;
+
     /** TLS record header is: type(1) + version(2) + length(2) */
     public static final int TLS_RECORD_HEADER_LEN = 5;
     /** TLS record header length high byte offset */
