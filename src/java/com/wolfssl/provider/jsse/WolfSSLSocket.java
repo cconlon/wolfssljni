@@ -36,6 +36,7 @@ import java.util.function.BiFunction;
 import java.util.List;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.channels.SocketChannel;
 import java.security.cert.CertificateEncodingException;
 
@@ -81,8 +82,11 @@ public class WolfSSLSocket extends SSLSocket {
     private WolfSSLOutputStream outStream;
 
     /* Track active I/O operations to prevent use-after-free */
-    private final java.util.concurrent.atomic.AtomicInteger activeOperations =
-        new java.util.concurrent.atomic.AtomicInteger(0);
+    private final AtomicInteger activeOperations = new AtomicInteger(0);
+
+    /* Set when close() starts tearing down this socket, so an I/O operation
+     * still running at close() time frees the session when it exits. */
+    private volatile boolean closeRequested = false;
 
     private ArrayList<HandshakeCompletedListener> hsListeners = null;
 
@@ -2076,7 +2080,77 @@ public class WolfSSLSocket extends SSLSocket {
      * Must be called for every successful enterIOOperation().
      */
     private void exitIOOperation() {
-        activeOperations.decrementAndGet();
+        /* Free only on last op out and close() is pending, so ops that exit
+         * with others ongoing skip the socket monitor. */
+        if ((activeOperations.decrementAndGet() == 0) && closeRequested) {
+            freeSSLIfInactive();
+        }
+    }
+
+    /**
+     * Free the native session if close() was requested and nothing can still
+     * use it: no threads in poll/select, streams closed, no active I/O op.
+     * Releases the interruptFds[] pipe early instead of waiting for finalize().
+     * Takes socket monitor then ioLock (matching close()) to order the free
+     * against other this.ssl readers and free at most once.
+     *
+     * May run on an I/O thread exiting read()/write(): logs a freeSSL() error
+     * rather than propagating it, and can block briefly on the socket monitor
+     * behind a concurrent close().
+     */
+    private void freeSSLIfInactive() {
+
+        /* No free pending. Free clears the flag, so a closed socket short
+         * circuits here too. */
+        if (!closeRequested) {
+            return;
+        }
+
+        synchronized (this) {
+            synchronized (ioLock) {
+                try {
+                    if (this.ssl == null) {
+                        closeRequested = false;
+                        return;
+                    }
+
+                    /* Some thread could still be using the session. */
+                    final int polled = this.ssl.getThreadsBlockedInPoll();
+                    final int active = activeOperations.get();
+                    final boolean streamsClosed = ioStreamsAreClosed();
+                    if ((polled != 0) || !streamsClosed || (active != 0)) {
+                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                            () -> "deferring freeing this.ssl, poll: " +
+                            polled + ", streamsClosed: " + streamsClosed +
+                            ", active: " + active);
+                        return;
+                    }
+
+                    /* Close ConsumedRecvCtx data streams before free */
+                    Object readCtx = this.ssl.getIOReadCtx();
+                    if (readCtx instanceof ConsumedRecvCtx) {
+                        try {
+                            ((ConsumedRecvCtx)readCtx).closeDataStreams();
+                        } catch (IOException ioe) {
+                            WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
+                                () -> "error closing ConsumedRecvCtx " +
+                                "streams: " + ioe);
+                        }
+                    }
+
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "freeing this.ssl from freeSSLIfInactive()");
+                    this.ssl.freeSSL();
+                    this.ssl = null;
+                    closeRequested = false;
+
+                } catch (IllegalStateException | WolfSSLJNIException e) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
+                        () -> "exception freeing this.ssl in " +
+                        "freeSSLIfInactive(): " + e);
+                }
+            }
+        }
     }
 
     /**
@@ -2108,6 +2182,9 @@ public class WolfSSLSocket extends SSLSocket {
      *
      * If this socket was created with an autoClose value set to true,
      * this will also close the underlying Socket.
+     *
+     * close() logs a native session free failure rather than throwing, since
+     * the free may run on a later I/O thread. See freeSSLIfInactive().
      *
      * @throws IOException upon error closing the connection
      */
@@ -2156,6 +2233,10 @@ public class WolfSSLSocket extends SSLSocket {
                     /* Get value of handshakeComplete while inside lock */
                     handshakeFinished = this.handshakeComplete;
                 }
+
+                /* Mark close requested before waking I/O threads, so whichever
+                 * exits last frees the session */
+                closeRequested = true;
 
                 WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                     () -> "signaling any blocked I/O threads to wake up");
@@ -2243,23 +2324,23 @@ public class WolfSSLSocket extends SSLSocket {
                             () -> "thread exiting ioLock (shutdown)");
 
                     } /* ioLock */
+                }
 
-                    /* Release Input/OutputStream objects. Do not close
-                     * WolfSSLSocket inside stream close, since we handle that
-                     * next below and do differently depending on if autoClose
-                     * has been set or not. */
-                    if (this.inStream != null) {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "close(), closing InputStream");
-                        this.inStream.close(false);
-                        this.inStream = null;
-                    }
-                    if (this.outStream != null) {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "close(), closing OutputStream");
-                        this.outStream.close(false);
-                        this.outStream = null;
-                    }
+                /* Release In/OutputStream objects on all teardown paths, not
+                 * only when the handshake finished, so close() frees a socket
+                 * whose handshake failed with streams still open instead of
+                 * deferring to finalize(). */
+                if (this.inStream != null) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "close(), closing InputStream");
+                    this.inStream.close(false);
+                    this.inStream = null;
+                }
+                if (this.outStream != null) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "close(), closing OutputStream");
+                    this.outStream.close(false);
+                    this.outStream = null;
                 }
 
                 /* Free this.ssl here instead of above for use cases
@@ -2270,28 +2351,11 @@ public class WolfSSLSocket extends SSLSocket {
                     WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
                         () -> "thread got ioLock (freeSSL)");
 
-                    /* Connection is closed, free native WOLFSSL session
-                     * to release native memory earlier than garbage
-                     * collector might with finalize(), Don't free if we
-                     * have threads still waiting in poll/select, if
-                     * our WolfSSLInputStream or WolfSSLOutputStream are
-                     * still open, or if there are active I/O operations. */
-                    if (this.ssl != null) {
-                        if ((this.ssl.getThreadsBlockedInPoll() == 0) &&
-                            ioStreamsAreClosed() && (activeOperations.get() == 0)) {
-                            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                                () -> "calling this.ssl.freeSSL()");
-                            this.ssl.freeSSL();
-                            this.ssl = null;
-                        } else {
-                            WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                                () -> "deferring freeing this.ssl, threads " +
-                                "blocked in poll: " +
-                                this.ssl.getThreadsBlockedInPoll() +
-                                ", streams not closed, or active operations: " +
-                                activeOperations.get());
-                        }
-                    }
+                    /* Free the native WOLFSSL session now to release memory
+                     * and the interruptFds[] pipe earlier than finalize(),
+                     * or defer to the last exiting I/O operation if a thread
+                     * could still be using it. */
+                    freeSSLIfInactive();
 
                     /* Mark closed on every teardown path, before clearing
                      * EngineHelper, so a later startHandshake() won't NPE.
@@ -2336,8 +2400,6 @@ public class WolfSSLSocket extends SSLSocket {
 
         } catch (IllegalStateException e) {
             throw new IOException(e);
-        } catch (WolfSSLJNIException jnie) {
-            throw new IOException(jnie);
         }
     }
 
