@@ -3676,6 +3676,34 @@ public class WolfSSLSocketTest {
         }
     }
 
+    /* Count this process's open file descriptors via /proc/self/fd, or -1
+     * where /proc is not available (non-Linux). */
+    private static int countOpenFds() {
+        String[] fds = new java.io.File("/proc/self/fd").list();
+        return (fds == null) ? -1 : fds.length;
+    }
+
+    /* Bound the setup handshake. On failure tear down the server side (plain
+     * Socket first, so its blocked handshake read returns) and return the
+     * failure, else null with SO_TIMEOUT reset. */
+    private static Throwable trySetupHandshake(SSLSocket cs, Socket plain,
+        SSLServerSocket ss, SSLSocket server, Future<Void> serverFuture)
+        throws Exception {
+
+        cs.setSoTimeout(10000);
+        try {
+            cs.startHandshake();
+        } catch (IOException e) {
+            closeQuietly(plain);
+            closeQuietly(ss);
+            serverFuture.get(30, TimeUnit.SECONDS);
+            closeQuietly(server);
+            return e;
+        }
+        cs.setSoTimeout(0);
+        return null;
+    }
+
     /* Races close() against OutputStream.write() under CPU load, verifying
      * write() never uses a WolfSSLSession that close() has freed. Bounded by
      * iteration count and wall clock budget to keep runtime predictable on
@@ -3684,6 +3712,8 @@ public class WolfSSLSocketTest {
     public void testSocketCloseDuringConcurrentWrite() throws Exception {
 
         int i;
+        int completed = 0;
+        Throwable lastSetupExc = null;
         String protocol = null;
         final int maxIterations = 300;
         final long budgetMs = 5000;
@@ -3773,7 +3803,16 @@ public class WolfSSLSocketTest {
                             }
                         });
 
-                    cs.startHandshake();
+                    /* Busy spinners above can starve this setup handshake
+                     * until it fails or blocks. Bound it and skip the
+                     * iteration on failure or timeout. */
+                    Throwable setupExc =
+                        trySetupHandshake(cs, plain, ss, server, serverFuture);
+                    if (setupExc != null) {
+                        lastSetupExc = setupExc;
+                        continue;
+                    }
+                    completed++;
 
                     final OutputStream out = cs.getOutputStream();
                     final Throwable[] writeExc = new Throwable[1];
@@ -3836,6 +3875,10 @@ public class WolfSSLSocketTest {
             es.shutdownNow();
             es.awaitTermination(30, TimeUnit.SECONDS);
         }
+
+        /* Guard against a silent pass if every setup handshake was skipped */
+        assertTrue("no iteration completed its setup handshake, last: " +
+            lastSetupExc, completed > 0);
     }
 
     /* Races close() against InputStream.read() under CPU load, verifying
@@ -3847,6 +3890,8 @@ public class WolfSSLSocketTest {
     public void testSocketCloseDuringConcurrentRead() throws Exception {
 
         int i;
+        int completed = 0;
+        Throwable lastSetupExc = null;
         String protocol = null;
         final int maxIterations = 500;
         final long budgetMs = 5000;
@@ -3938,7 +3983,16 @@ public class WolfSSLSocketTest {
                             }
                         });
 
-                    cs.startHandshake();
+                    /* Busy spinners above can starve this setup handshake
+                     * until it fails or blocks. Bound it and skip the
+                     * iteration on failure or timeout. */
+                    Throwable setupExc =
+                        trySetupHandshake(cs, plain, ss, server, serverFuture);
+                    if (setupExc != null) {
+                        lastSetupExc = setupExc;
+                        continue;
+                    }
+                    completed++;
 
                     final InputStream in = cs.getInputStream();
                     final Throwable[] readExc = new Throwable[1];
@@ -4001,6 +4055,395 @@ public class WolfSSLSocketTest {
             spinStop.set(true);
             /* shutdownNow() interrupts tasks left running on a failure or
              * timeout, awaitTermination() bounds the wait */
+            es.shutdownNow();
+            es.awaitTermination(30, TimeUnit.SECONDS);
+        }
+
+        /* Guard against a silent pass if every setup handshake was skipped */
+        assertTrue("no iteration completed its setup handshake, last: " +
+            lastSetupExc, completed > 0);
+    }
+
+    /* Closing an SSLSocket mid-write makes close() defer the native
+     * freeSSL(). The write's exit must still free the session's interrupt
+     * pipe() descriptors. Linux only, counts /proc/self/fd. */
+    @Test(timeout = 120000)
+    public void testSocketCloseDuringWriteDoesNotLeakFds() throws Exception {
+
+        /* Descriptor counting needs /proc/self/fd (Linux). */
+        Assume.assumeTrue(new java.io.File("/proc/self/fd").isDirectory());
+
+        String protocol = null;
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv13Enabled()) {
+            protocol = "TLSv1.3";
+        }
+        Assume.assumeNotNull(protocol);
+
+        this.ctx = tf.createSSLContext(protocol, ctxProvider);
+        ExecutorService es = Executors.newCachedThreadPool();
+
+        final int iterations = 200;
+        final int warmupIterations = 10;
+        long baseline = -1;
+        /* Retain closed sockets so finalize() cannot free a leaked pipe and
+         * mask a reverted build. */
+        final java.util.List<SSLSocket> retained =
+            new java.util.ArrayList<>();
+
+        try {
+            for (int i = 0; i < iterations; i++) {
+
+                SSLServerSocket ss = null;
+                Socket plain = null;
+                SSLSocket cs = null;
+                SSLSocket server = null;
+
+                try {
+                    ss = (SSLServerSocket)ctx
+                        .getServerSocketFactory().createServerSocket(0);
+                    plain = new Socket();
+                    plain.connect(new InetSocketAddress("127.0.0.1",
+                        ss.getLocalPort()));
+                    cs = (SSLSocket)ctx.getSocketFactory()
+                        .createSocket(plain, "127.0.0.1",
+                            ss.getLocalPort(), false);
+                    server = (SSLSocket)ss.accept();
+
+                    final SSLSocket serverConn = server;
+                    Future<Void> serverFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                try {
+                                    serverConn.startHandshake();
+                                    byte[] tmp = new byte[8192];
+                                    InputStream in =
+                                        serverConn.getInputStream();
+                                    while (in.read(tmp) >= 0) {
+                                        /* discard data */
+                                    }
+                                } catch (Exception e) {
+                                    /* expected once connection closed */
+                                }
+                                return null;
+                            }
+                        });
+
+                    cs.startHandshake();
+
+                    final OutputStream out = cs.getOutputStream();
+                    final CountDownLatch writing = new CountDownLatch(1);
+                    final Throwable[] writeExc = new Throwable[1];
+                    Future<Void> writeFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                byte[] one = new byte[1];
+                                try {
+                                    while (true) {
+                                        writing.countDown();
+                                        out.write(one);
+                                    }
+                                } catch (Throwable t) {
+                                    writeExc[0] = t;
+                                }
+                                return null;
+                            }
+                        });
+
+                    /* Wait until writer thread is running before closing, so
+                     * close() overlaps an active write and takes the
+                     * deferred-free path for most iterations. */
+                    assertTrue("writer thread never started",
+                        writing.await(10, TimeUnit.SECONDS));
+                    cs.close();
+
+                    writeFuture.get(30, TimeUnit.SECONDS);
+
+                    /* A freed-session use during the race must never show up
+                     * as a "has been freed" error to the writer. */
+                    Throwable t = writeExc[0];
+                    while (t != null) {
+                        String msg = t.getMessage();
+                        if (msg != null && msg.contains("has been freed")) {
+                            fail("write() used freed WOLFSSL session: " + t);
+                        }
+                        t = t.getCause();
+                    }
+                    server.close();
+                    ss.close();
+                    plain.close();
+                    serverFuture.get(30, TimeUnit.SECONDS);
+                }
+                finally {
+                    closeQuietly(cs);
+                    closeQuietly(server);
+                    closeQuietly(ss);
+                    closeQuietly(plain);
+                }
+
+                retained.add(cs);
+
+                /* Baseline once past a short warm-up so one-time descriptors
+                 * are not counted as growth. */
+                if (i == warmupIterations) {
+                    baseline = countOpenFds();
+                }
+            }
+
+            /* Without the fix each iteration leaks the 2-descriptor interrupt
+             * pipe, so a revert grows this by several hundred. close() frees
+             * it, so growth is near zero. Allow headroom for unrelated fds. */
+            assertTrue("fd baseline was never recorded", baseline >= 0);
+            long after = countOpenFds();
+            assertTrue("could not count open fds", after >= 0);
+            assertTrue("retained sockets were collected",
+                retained.size() > 0);
+            long growth = after - baseline;
+            assertTrue("interrupt pipe descriptors leaked on close: " +
+                growth, growth < 100);
+        }
+        finally {
+            es.shutdownNow();
+            es.awaitTermination(30, TimeUnit.SECONDS);
+        }
+    }
+
+    /* When a socket has streams but its handshake fails, close() must still
+     * free the native session (and its interrupt pipe), not leak it to
+     * finalize(). Linux only, counts /proc/self/fd. */
+    @Test(timeout = 120000)
+    public void testCloseAfterHandshakeFailDoesNotLeakFds() throws Exception {
+
+        Assume.assumeTrue(new java.io.File("/proc/self/fd").isDirectory());
+
+        String protocol = null;
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv13Enabled()) {
+            protocol = "TLSv1.3";
+        }
+        Assume.assumeNotNull(protocol);
+
+        this.ctx = tf.createSSLContext(protocol, ctxProvider);
+
+        final int iterations = 200;
+        final int warmupIterations = 10;
+        long baseline = -1;
+        /* Retain closed sockets so finalize() cannot free a leaked pipe and
+         * mask a reverted build. */
+        final java.util.List<SSLSocket> retained =
+            new java.util.ArrayList<>();
+
+        for (int i = 0; i < iterations; i++) {
+
+            ServerSocket ss = null;
+            Socket plain = null;
+            SSLSocket cs = null;
+
+            try {
+                /* Plain (non-TLS) server that accepts then closes, so the
+                 * client handshake fails after the streams are created. */
+                ss = new ServerSocket(0);
+                final ServerSocket srv = ss;
+                Thread acceptor = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            Socket s = srv.accept();
+                            s.close();
+                        } catch (Exception e) {
+                            /* ignore */
+                        }
+                    }
+                });
+                acceptor.setDaemon(true);
+                acceptor.start();
+
+                plain = new Socket();
+                plain.connect(new InetSocketAddress("127.0.0.1",
+                    ss.getLocalPort()));
+                cs = (SSLSocket)ctx.getSocketFactory()
+                    .createSocket(plain, "127.0.0.1", ss.getLocalPort(), false);
+                cs.setSoTimeout(10000);
+
+                /* Create the streams, then drive the handshake to failure. */
+                cs.getInputStream();
+                cs.getOutputStream();
+                try {
+                    cs.startHandshake();
+                    fail("handshake should have failed");
+                } catch (IOException e) {
+                    /* expected: server closed without doing TLS */
+                }
+                acceptor.join(5000);
+            }
+            finally {
+                closeQuietly(cs);
+                closeQuietly(plain);
+                closeQuietly(ss);
+            }
+
+            retained.add(cs);
+
+            if (i == warmupIterations) {
+                baseline = countOpenFds();
+            }
+        }
+
+        assertTrue("fd baseline was never recorded", baseline >= 0);
+        long after = countOpenFds();
+        assertTrue("could not count open fds", after >= 0);
+        assertTrue("retained sockets were collected", retained.size() > 0);
+        long growth = after - baseline;
+        assertTrue("interrupt pipe descriptors leaked after handshake " +
+            "failure: " + growth, growth < 100);
+    }
+
+    /* Directed test for the deferred free: a reader keeps reading when close()
+     * runs, so close() defers freeSSL() to the reader's exit. Checks the
+     * reader's exit frees the interrupt pipe, not finalize(). Linux only,
+     * counts /proc/self/fd. */
+    @Test(timeout = 120000)
+    public void testCloseDuringActiveReadFreesPipe() throws Exception {
+
+        Assume.assumeTrue(new java.io.File("/proc/self/fd").isDirectory());
+
+        String protocol = null;
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv13Enabled()) {
+            protocol = "TLSv1.3";
+        }
+        Assume.assumeNotNull(protocol);
+
+        this.ctx = tf.createSSLContext(protocol, ctxProvider);
+        ExecutorService es = Executors.newCachedThreadPool();
+
+        final int iterations = 50;
+        final int warmupIterations = 5;
+        long baseline = -1;
+        /* Retain closed sockets so finalize() cannot free a leaked pipe and
+         * mask a reverted build. */
+        final java.util.List<SSLSocket> retained =
+            new java.util.ArrayList<>();
+
+        try {
+            for (int i = 0; i < iterations; i++) {
+
+                SSLServerSocket ss = null;
+                Socket plain = null;
+                SSLSocket cs = null;
+                SSLSocket server = null;
+                Future<Void> serverFuture = null;
+
+                try {
+                    ss = (SSLServerSocket)ctx
+                        .getServerSocketFactory().createServerSocket(0);
+                    plain = new Socket();
+                    plain.connect(new InetSocketAddress("127.0.0.1",
+                        ss.getLocalPort()));
+                    cs = (SSLSocket)ctx.getSocketFactory()
+                        .createSocket(plain, "127.0.0.1",
+                            ss.getLocalPort(), false);
+                    server = (SSLSocket)ss.accept();
+
+                    /* Server streams bytes so the client read() stays active,
+                     * keeping an I/O op in flight when close() runs. */
+                    final SSLSocket serverConn = server;
+                    serverFuture = es.submit(new Callable<Void>() {
+                        @Override
+                        public Void call() throws Exception {
+                            try {
+                                serverConn.startHandshake();
+                                OutputStream sout =
+                                    serverConn.getOutputStream();
+                                byte[] one = new byte[1];
+                                while (true) {
+                                    sout.write(one);
+                                }
+                            } catch (Exception e) {
+                                /* expected once closed */
+                            }
+                            return null;
+                        }
+                    });
+
+                    cs.startHandshake();
+
+                    final InputStream in = cs.getInputStream();
+                    final CountDownLatch reading = new CountDownLatch(1);
+                    final Throwable[] readExc = new Throwable[1];
+                    Future<Void> readFuture = es.submit(
+                        new Callable<Void>() {
+                            @Override
+                            public Void call() throws Exception {
+                                byte[] buf = new byte[1];
+                                try {
+                                    reading.countDown();
+                                    while (in.read(buf) >= 0) {
+                                        /* keep an I/O op in flight */
+                                    }
+                                } catch (Throwable t) {
+                                    readExc[0] = t;
+                                }
+                                return null;
+                            }
+                        });
+
+                    /* Reader is active, so close() defers the free to exit */
+                    assertTrue("reader thread never started",
+                        reading.await(10, TimeUnit.SECONDS));
+                    Thread.sleep(50);
+
+                    cs.close();
+                    readFuture.get(30, TimeUnit.SECONDS);
+
+                    /* A freed-session use must not reach the reader. */
+                    Throwable t = readExc[0];
+                    while (t != null) {
+                        String msg = t.getMessage();
+                        if (msg != null && msg.contains("has been freed")) {
+                            fail("read() used freed WOLFSSL session: " + t);
+                        }
+                        t = t.getCause();
+                    }
+                }
+                finally {
+                    closeQuietly(cs);
+                    closeQuietly(server);
+                    closeQuietly(ss);
+                    closeQuietly(plain);
+
+                    /* Wait for the server writer to exit before the next
+                     * iteration opens new sockets. */
+                    if (serverFuture != null) {
+                        try {
+                            serverFuture.get(30, TimeUnit.SECONDS);
+                        } catch (Exception e) {
+                            /* writer exit races socket close, ignore */
+                        }
+                    }
+                }
+
+                retained.add(cs);
+
+                if (i == warmupIterations) {
+                    baseline = countOpenFds();
+                }
+            }
+
+            assertTrue("fd baseline was never recorded", baseline >= 0);
+            long after = countOpenFds();
+            assertTrue("could not count open fds", after >= 0);
+            assertTrue("retained sockets were collected", retained.size() > 0);
+            long growth = after - baseline;
+            assertTrue("interrupt pipe not freed on deferred path: " +
+                growth, growth < 100);
+        }
+        finally {
             es.shutdownNow();
             es.awaitTermination(30, TimeUnit.SECONDS);
         }
