@@ -187,6 +187,8 @@ extern "C" {
 #define com_wolfssl_WolfSSL_CACHE_MATCH_ERROR -280L
 #undef com_wolfssl_WolfSSL_MAX_RECORD_SIZE
 #define com_wolfssl_WolfSSL_MAX_RECORD_SIZE 16384L
+#undef com_wolfssl_WolfSSL_EXTERNAL_SERIAL_SIZE
+#define com_wolfssl_WolfSSL_EXTERNAL_SERIAL_SIZE 32L
 #undef com_wolfssl_WolfSSL_TLS_RECORD_HEADER_LEN
 #define com_wolfssl_WolfSSL_TLS_RECORD_HEADER_LEN 5L
 #undef com_wolfssl_WolfSSL_TLS_RECORD_LEN_HI_OFF
