@@ -56,6 +56,7 @@ import java.net.Socket;
 import java.net.ServerSocket;
 import java.net.SocketAddress;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.net.ConnectException;
 import javax.net.SocketFactory;
 import javax.net.ssl.SSLSocket;
@@ -3683,9 +3684,11 @@ public class WolfSSLSocketTest {
         return (fds == null) ? -1 : fds.length;
     }
 
-    /* Bound the setup handshake. On failure tear down the server side (plain
-     * Socket first, so its blocked handshake read returns) and return the
-     * failure, else null with SO_TIMEOUT reset. */
+    /* Bound the setup handshake. Tear down the server side on failure (plain
+     * Socket first, so its blocked handshake read returns), then return a
+     * starvation timeout for the caller to skip, or throw anything else since
+     * only the timeout is expected here. Returns null with SO_TIMEOUT reset
+     * when the handshake succeeded. */
     private static Throwable trySetupHandshake(SSLSocket cs, Socket plain,
         SSLServerSocket ss, SSLSocket server, Future<Void> serverFuture)
         throws Exception {
@@ -3698,6 +3701,9 @@ public class WolfSSLSocketTest {
             closeQuietly(ss);
             serverFuture.get(30, TimeUnit.SECONDS);
             closeQuietly(server);
+            if (!(e instanceof SocketTimeoutException)) {
+                throw e;
+            }
             return e;
         }
         cs.setSoTimeout(0);
@@ -3712,6 +3718,7 @@ public class WolfSSLSocketTest {
     public void testSocketCloseDuringConcurrentWrite() throws Exception {
 
         int i;
+        int attempted = 0;
         int completed = 0;
         Throwable lastSetupExc = null;
         String protocol = null;
@@ -3804,8 +3811,9 @@ public class WolfSSLSocketTest {
                         });
 
                     /* Busy spinners above can starve this setup handshake
-                     * until it fails or blocks. Bound it and skip the
-                     * iteration on failure or timeout. */
+                     * until it times out. Bound it and skip the iteration
+                     * when that happens. */
+                    attempted++;
                     Throwable setupExc =
                         trySetupHandshake(cs, plain, ss, server, serverFuture);
                     if (setupExc != null) {
@@ -3876,9 +3884,12 @@ public class WolfSSLSocketTest {
             es.awaitTermination(30, TimeUnit.SECONDS);
         }
 
-        /* Guard against a silent pass if every setup handshake was skipped */
-        assertTrue("no iteration completed its setup handshake, last: " +
-            lastSetupExc, completed > 0);
+        /* Guard against a silent pass: the race is only exercised by the
+         * iterations that got past their setup handshake, so most of them
+         * must have completed one */
+        assertTrue("only " + completed + " of " + attempted + " iterations " +
+            "completed their setup handshake, last: " + lastSetupExc,
+            (completed > 0) && (completed >= ((attempted + 1) / 2)));
     }
 
     /* Races close() against InputStream.read() under CPU load, verifying
@@ -3890,6 +3901,7 @@ public class WolfSSLSocketTest {
     public void testSocketCloseDuringConcurrentRead() throws Exception {
 
         int i;
+        int attempted = 0;
         int completed = 0;
         Throwable lastSetupExc = null;
         String protocol = null;
@@ -3984,8 +3996,9 @@ public class WolfSSLSocketTest {
                         });
 
                     /* Busy spinners above can starve this setup handshake
-                     * until it fails or blocks. Bound it and skip the
-                     * iteration on failure or timeout. */
+                     * until it times out. Bound it and skip the iteration
+                     * when that happens. */
+                    attempted++;
                     Throwable setupExc =
                         trySetupHandshake(cs, plain, ss, server, serverFuture);
                     if (setupExc != null) {
@@ -4059,9 +4072,12 @@ public class WolfSSLSocketTest {
             es.awaitTermination(30, TimeUnit.SECONDS);
         }
 
-        /* Guard against a silent pass if every setup handshake was skipped */
-        assertTrue("no iteration completed its setup handshake, last: " +
-            lastSetupExc, completed > 0);
+        /* Guard against a silent pass: the race is only exercised by the
+         * iterations that got past their setup handshake, so most of them
+         * must have completed one */
+        assertTrue("only " + completed + " of " + attempted + " iterations " +
+            "completed their setup handshake, last: " + lastSetupExc,
+            (completed > 0) && (completed >= ((attempted + 1) / 2)));
     }
 
     /* Closing an SSLSocket mid-write makes close() defer the native
@@ -4322,8 +4338,8 @@ public class WolfSSLSocketTest {
         this.ctx = tf.createSSLContext(protocol, ctxProvider);
         ExecutorService es = Executors.newCachedThreadPool();
 
-        final int iterations = 50;
-        final int warmupIterations = 5;
+        final int iterations = 200;
+        final int warmupIterations = 10;
         long baseline = -1;
         /* Retain closed sockets so finalize() cannot free a leaked pipe and
          * mask a reverted build. */
@@ -4435,6 +4451,9 @@ public class WolfSSLSocketTest {
                 }
             }
 
+            /* A deferred free that never runs leaks the 2-descriptor
+             * interrupt pipe every measured iteration, several times the
+             * bound below, leaving the rest as headroom for unrelated fds. */
             assertTrue("fd baseline was never recorded", baseline >= 0);
             long after = countOpenFds();
             assertTrue("could not count open fds", after >= 0);

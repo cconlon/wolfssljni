@@ -2083,7 +2083,14 @@ public class WolfSSLSocket extends SSLSocket {
         /* Free only on last op out and close() is pending, so ops that exit
          * with others ongoing skip the socket monitor. */
         if ((activeOperations.decrementAndGet() == 0) && closeRequested) {
-            freeSSLIfInactive();
+            try {
+                freeSSLIfInactive();
+            } catch (IllegalStateException | WolfSSLJNIException e) {
+                /* close() has already returned to the application here,
+                 * so log the failure instead of propagating it. */
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
+                    () -> "exception freeing this.ssl on I/O exit: " + e);
+            }
         }
     }
 
@@ -2094,11 +2101,19 @@ public class WolfSSLSocket extends SSLSocket {
      * Takes socket monitor then ioLock (matching close()) to order the free
      * against other this.ssl readers and free at most once.
      *
-     * May run on an I/O thread exiting read()/write(): logs a freeSSL() error
-     * rather than propagating it, and can block briefly on the socket monitor
-     * behind a concurrent close().
+     * May run on an I/O thread exiting read()/write(), where it can block
+     * briefly on the socket monitor behind a concurrent close().
+     *
+     * Failures are left to the caller: close() reports them to the
+     * application as IOException, the I/O exit path has no caller left to
+     * report to and logs them instead.
+     *
+     * @throws IllegalStateException if the native session has already been
+     *         freed
+     * @throws WolfSSLJNIException if the native free fails
      */
-    private void freeSSLIfInactive() {
+    private void freeSSLIfInactive()
+        throws IllegalStateException, WolfSSLJNIException {
 
         /* No free pending. Free clears the flag, so a closed socket short
          * circuits here too. */
@@ -2108,47 +2123,40 @@ public class WolfSSLSocket extends SSLSocket {
 
         synchronized (this) {
             synchronized (ioLock) {
-                try {
-                    if (this.ssl == null) {
-                        closeRequested = false;
-                        return;
-                    }
-
-                    /* Some thread could still be using the session. */
-                    final int polled = this.ssl.getThreadsBlockedInPoll();
-                    final int active = activeOperations.get();
-                    final boolean streamsClosed = ioStreamsAreClosed();
-                    if ((polled != 0) || !streamsClosed || (active != 0)) {
-                        WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                            () -> "deferring freeing this.ssl, poll: " +
-                            polled + ", streamsClosed: " + streamsClosed +
-                            ", active: " + active);
-                        return;
-                    }
-
-                    /* Close ConsumedRecvCtx data streams before free */
-                    Object readCtx = this.ssl.getIOReadCtx();
-                    if (readCtx instanceof ConsumedRecvCtx) {
-                        try {
-                            ((ConsumedRecvCtx)readCtx).closeDataStreams();
-                        } catch (IOException ioe) {
-                            WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
-                                () -> "error closing ConsumedRecvCtx " +
-                                "streams: " + ioe);
-                        }
-                    }
-
-                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
-                        () -> "freeing this.ssl from freeSSLIfInactive()");
-                    this.ssl.freeSSL();
-                    this.ssl = null;
+                if (this.ssl == null) {
                     closeRequested = false;
-
-                } catch (IllegalStateException | WolfSSLJNIException e) {
-                    WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
-                        () -> "exception freeing this.ssl in " +
-                        "freeSSLIfInactive(): " + e);
+                    return;
                 }
+
+                /* Some thread could still be using the session. */
+                final int polled = this.ssl.getThreadsBlockedInPoll();
+                final int active = activeOperations.get();
+                final boolean streamsClosed = ioStreamsAreClosed();
+                if ((polled != 0) || !streamsClosed || (active != 0)) {
+                    WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                        () -> "deferring freeing this.ssl, poll: " +
+                        polled + ", streamsClosed: " + streamsClosed +
+                        ", active: " + active);
+                    return;
+                }
+
+                /* Close ConsumedRecvCtx data streams before free */
+                Object readCtx = this.ssl.getIOReadCtx();
+                if (readCtx instanceof ConsumedRecvCtx) {
+                    try {
+                        ((ConsumedRecvCtx)readCtx).closeDataStreams();
+                    } catch (IOException ioe) {
+                        WolfSSLDebug.log(getClass(), WolfSSLDebug.ERROR,
+                            () -> "error closing ConsumedRecvCtx " +
+                            "streams: " + ioe);
+                    }
+                }
+
+                WolfSSLDebug.log(getClass(), WolfSSLDebug.INFO,
+                    () -> "freeing this.ssl from freeSSLIfInactive()");
+                this.ssl.freeSSL();
+                this.ssl = null;
+                closeRequested = false;
             }
         }
     }
@@ -2183,8 +2191,9 @@ public class WolfSSLSocket extends SSLSocket {
      * If this socket was created with an autoClose value set to true,
      * this will also close the underlying Socket.
      *
-     * close() logs a native session free failure rather than throwing, since
-     * the free may run on a later I/O thread. See freeSSLIfInactive().
+     * A native session free that has to be deferred to an I/O thread still
+     * running here cannot report back to this caller, and is logged there
+     * instead. See freeSSLIfInactive().
      *
      * @throws IOException upon error closing the connection
      */
@@ -2400,6 +2409,9 @@ public class WolfSSLSocket extends SSLSocket {
 
         } catch (IllegalStateException e) {
             throw new IOException(e);
+
+        } catch (WolfSSLJNIException jnie) {
+            throw new IOException(jnie);
         }
     }
 
