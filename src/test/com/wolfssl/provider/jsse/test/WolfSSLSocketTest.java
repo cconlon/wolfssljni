@@ -107,7 +107,10 @@ import com.wolfssl.provider.jsse.WolfSSLProvider;
 import com.wolfssl.provider.jsse.WolfSSLSocketFactory;
 import com.wolfssl.provider.jsse.WolfSSLSocket;
 import com.wolfssl.WolfSSL;
+import com.wolfssl.WolfSSLContext;
 import com.wolfssl.WolfSSLException;
+import com.wolfssl.WolfSSLJNIException;
+import com.wolfssl.WolfSSLSession;
 
 /* Tests run by this class:
     public void testGetSupportedCipherSuites();
@@ -4466,6 +4469,121 @@ public class WolfSSLSocketTest {
             es.shutdownNow();
             es.awaitTermination(30, TimeUnit.SECONDS);
         }
+    }
+
+    /* WolfSSLSession whose native free fails, so close() has a session
+     * cleanup failure to report. */
+    private static class FreeFailSession extends WolfSSLSession {
+
+        private final Throwable failure;
+
+        FreeFailSession(WolfSSLContext ctx, Throwable failure)
+            throws WolfSSLException {
+            super(ctx);
+            this.failure = failure;
+        }
+
+        @Override
+        public void freeSSL() {
+            throwUndeclared(this.failure);
+        }
+
+        /* Free the real session behind this object, so a test that never
+         * reaches freeSSL() does not leak it. */
+        void freeSSLForReal() throws WolfSSLJNIException {
+            super.freeSSL();
+        }
+    }
+
+    /* Throw a checked exception that the method does not declare, which is
+     * how the JNI layer raises WolfSSLException out of freeSSL(). */
+    @SuppressWarnings("unchecked")
+    private static <E extends Throwable> void throwUndeclared(Throwable t)
+        throws E {
+        throw (E)t;
+    }
+
+    /* Fail the native session free during close() and check the failure
+     * reaches the caller as IOException, after close() has finished closing
+     * this socket and its underlying transport. */
+    private void checkCloseReportsFreeFailure(Throwable failure)
+        throws Exception {
+
+        ServerSocket ss = null;
+        Socket plain = null;
+        SSLSocket cs = null;
+        WolfSSLContext jniCtx = null;
+        FreeFailSession failSsl = null;
+        WolfSSLSession origSsl = null;
+
+        try {
+            ss = new ServerSocket(0);
+            plain = new Socket();
+            plain.connect(new InetSocketAddress("127.0.0.1",
+                ss.getLocalPort()));
+
+            /* autoClose true, so close() owns the underlying Socket */
+            cs = (SSLSocket)this.ctx.getSocketFactory().createSocket(
+                plain, "127.0.0.1", ss.getLocalPort(), true);
+
+            jniCtx = new WolfSSLContext(WolfSSL.SSLv23_ClientMethod());
+            failSsl = new FreeFailSession(jniCtx, failure);
+
+            Field sslField = WolfSSLSocket.class.getDeclaredField("ssl");
+            sslField.setAccessible(true);
+            origSsl = (WolfSSLSession)sslField.get(cs);
+            sslField.set(cs, failSsl);
+
+            try {
+                cs.close();
+                fail("close() did not report the native free failure");
+            } catch (IOException e) {
+                assertEquals("close() reported the wrong failure",
+                    failure, e.getCause());
+            }
+
+            assertTrue("close() left the underlying Socket open",
+                cs.isClosed());
+
+            /* Drop the injected session, this socket is done with it */
+            sslField.set(cs, null);
+        }
+        finally {
+            if (failSsl != null) {
+                failSsl.freeSSLForReal();
+            }
+            if (origSsl != null) {
+                origSsl.freeSSL();
+            }
+            if (jniCtx != null) {
+                jniCtx.free();
+            }
+            closeQuietly(plain);
+            closeQuietly(ss);
+        }
+    }
+
+    /* A native session free that fails must not be swallowed by close() */
+    @Test
+    public void testCloseReportsNativeFreeFailure() throws Exception {
+
+        String protocol = null;
+
+        if (WolfSSL.TLSv12Enabled()) {
+            protocol = "TLSv1.2";
+        } else if (WolfSSL.TLSv13Enabled()) {
+            protocol = "TLSv1.3";
+        }
+        Assume.assumeNotNull(protocol);
+
+        this.ctx = tf.createSSLContext(protocol, ctxProvider);
+
+        /* freeSSL() declares WolfSSLJNIException, the JNI layer raises
+         * WolfSSLException, close() has to report either one */
+        checkCloseReportsFreeFailure(
+            new WolfSSLJNIException("simulated native free failure"));
+        checkCloseReportsFreeFailure(
+            new WolfSSLException("simulated native free failure"));
     }
 
     @Test
